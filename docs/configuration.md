@@ -86,12 +86,20 @@ in [`src/d4h.ts`](../src/d4h.ts) and extend the `D4HRegion` union.
 
 ### Claude Desktop
 
+For the full step-by-step including the **WSL2 + Windows host** gotcha,
+verification, smoke-test prompts, and troubleshooting matrix, see the
+dedicated guide:
+
+📘 **[docs/claude-desktop.md](./claude-desktop.md)**
+
+Minimum config snippet (uses the published npm package — zero local setup):
+
 ```json
 {
   "mcpServers": {
     "d4h": {
-      "command": "node",
-      "args": ["/absolute/path/to/mcp-d4h/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "@gfnord/mcp-d4h"],
       "env": {
         "D4H_TEAM_MANAGER_API_KEY": "tm_pat_xxxxxxxxxxxxxxxx",
         "D4H_TEAM_ID": "12345",
@@ -105,7 +113,7 @@ in [`src/d4h.ts`](../src/d4h.ts) and extend the `D4HRegion` union.
 Config file locations:
 
 - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Linux / WSL2:** `~/.config/Claude/claude_desktop_config.json`
+- **Linux:** `~/.config/Claude/claude_desktop_config.json`
 - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 
 Restart Claude Desktop after editing.

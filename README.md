@@ -154,9 +154,10 @@ by the model.
 
 | Doc | Topic |
 |-----|-------|
-| **[docs/architecture.md](./docs/architecture.md)** | System design, request lifecycle, error model, security |
+| **[docs/claude-desktop.md](./docs/claude-desktop.md)** | 📘 End-to-end Claude Desktop setup with WSL2 + Windows host walkthrough |
 | **[docs/tools.md](./docs/tools.md)** | Per-tool reference: inputs, outputs, examples |
 | **[docs/configuration.md](./docs/configuration.md)** | Env vars, PAT generation, regions, troubleshooting |
+| **[docs/architecture.md](./docs/architecture.md)** | System design, request lifecycle, error model, security |
 | **[docs/development.md](./docs/development.md)** | Dev workflow, adding tools, code style, release |
 
 ---
