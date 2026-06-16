@@ -1,0 +1,106 @@
+name: Publish package
+
+# Publishes @gfnord/mcp-d4h to BOTH the public npm registry and GitHub Packages
+# whenever a version tag (v*) is pushed.
+#
+# Tag flow:
+#   npm version patch          # bumps version + creates tag locally
+#   git push --follow-tags     # pushes the tag, fires this workflow
+#
+# Required secret:
+#   NPM_TOKEN   - npm Automation token (https://www.npmjs.com/settings/<user>/tokens)
+#
+# GITHUB_TOKEN is provided automatically by Actions and has packages:write
+# scope as long as the workflow's `permissions:` block includes it.
+#
+# Security note: this workflow does NOT consume any untrusted input
+# (issue titles, PR descriptions, commit messages, etc.). It only reacts to
+# tag refs and uses secrets via NODE_AUTH_TOKEN, which is the documented
+# pattern for actions/setup-node + npm publish.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: Build and verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify dist/ entry point exists
+        run: |
+          test -f dist/index.js || (echo "::error::dist/index.js missing after build" && exit 1)
+          head -1 dist/index.js | grep -q '^#!/usr/bin/env node' \
+            || (echo "::error::shebang missing on dist/index.js" && exit 1)
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-bundle
+          path: |
+            dist
+            package.json
+            package-lock.json
+            README.md
+            LICENSE
+
+  publish-npm:
+    name: Publish to npm (public)
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: package-bundle
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@gfnord'
+
+      - name: Publish
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-github:
+    name: Publish to GitHub Packages
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: package-bundle
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@gfnord'
+
+      - name: Publish
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

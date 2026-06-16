@@ -250,31 +250,62 @@ A good first test target is `D4HApiError` formatting and the
 
 ## 8. Releasing
 
-### As a regular dependency
+Releases are **fully automated via GitHub Actions**
+([`.github/workflows/publish.yml`](../.github/workflows/publish.yml)).
+Pushing a tag of the form `v*` triggers a workflow that:
+
+1. Builds and verifies `dist/index.js` (shebang + entry-point check).
+2. Publishes `@gfnord/mcp-d4h` to **public npm** (registry.npmjs.org) — uses
+   `NPM_TOKEN` repo secret + npm provenance.
+3. Publishes the same tarball to **GitHub Packages**
+   (npm.pkg.github.com) — uses the auto-provided `GITHUB_TOKEN`.
+
+### Standard release flow
 
 ```bash
-npm version patch        # or minor / major
-npm publish              # runs prepublishOnly => clean + build
-git push --follow-tags
+# from a clean working tree on main:
+npm version patch         # bumps version in package.json, creates v* tag
+git push --follow-tags    # pushes commit + tag, fires the workflow
 ```
 
-### As a global bin
+Watch it run:
+
+```bash
+gh run watch
+gh run view --log
+```
+
+### One-time setup (already done if you're reading this)
+
+- Repo secret `NPM_TOKEN`: npm Automation token with publish rights for
+  `@gfnord/mcp-d4h`. Set via `gh secret set NPM_TOKEN`.
+- Public npm scope `@gfnord` exists (created on first `npm publish`).
+- GitHub Packages requires no setup — the workflow has `packages: write`
+  permission.
+
+### Local install (for development)
 
 ```bash
 npm install -g .
 mcp-d4h                  # boots the server (will fail on missing env, by design)
 ```
 
-### Tagged GitHub release
+### Manual publish fallback
 
-After `npm version`, the tag exists locally. Push it:
+If you ever need to bypass CI:
 
 ```bash
-git push origin v0.1.1
+npm version patch
+npm publish --access public        # public npm
+# Then for GitHub Packages, switch registry temporarily:
+npm publish --registry=https://npm.pkg.github.com
 ```
 
-Then either use the GitHub UI or `gh release create v0.1.1 --generate-notes`
-to publish a release.
+### Tagged GitHub release notes (optional)
+
+```bash
+gh release create v0.1.1 --generate-notes
+```
 
 ---
 

@@ -41,6 +41,27 @@ output shapes.
 
 ## Quick start
 
+### Option A — Install from npm (recommended for end users)
+
+The package is published as **[`@gfnord/mcp-d4h`](https://www.npmjs.com/package/@gfnord/mcp-d4h)**
+on the public npm registry. No clone needed — point your MCP host directly at
+it via `npx`. Skip to [Wire it into Claude Desktop](#wire-it-into-claude-desktop)
+below for the config snippet.
+
+If you want the `mcp-d4h` command on your PATH:
+
+```bash
+npm install -g @gfnord/mcp-d4h
+mcp-d4h --help    # or just `mcp-d4h` to boot the stdio server
+```
+
+The same package is also mirrored to **GitHub Packages** at
+`https://npm.pkg.github.com`. Installing from there requires a GitHub PAT
+with `read:packages` scope and an `.npmrc` entry — most users should prefer
+public npm.
+
+### Option B — Clone and build from source (for development)
+
 ```bash
 git clone https://github.com/gfnord/mcp-d4h.git
 cd mcp-d4h
@@ -84,6 +105,26 @@ Edit the host config:
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - Linux / WSL2: `~/.config/Claude/claude_desktop_config.json`
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+**Recommended (uses the published npm package — zero local setup):**
+
+```json
+{
+  "mcpServers": {
+    "d4h": {
+      "command": "npx",
+      "args": ["-y", "@gfnord/mcp-d4h"],
+      "env": {
+        "D4H_TEAM_MANAGER_API_KEY": "tm_pat_xxxxxxxxxxxxxxxx",
+        "D4H_TEAM_ID": "12345",
+        "D4H_REGION": "US"
+      }
+    }
+  }
+}
+```
+
+**Alternative (point at a local clone):**
 
 ```json
 {
