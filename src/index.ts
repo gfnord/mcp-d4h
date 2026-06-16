@@ -25,8 +25,6 @@ import {
 // Bootstrap
 // ---------------------------------------------------------------------------
 
-// Load .env if present. Failures are silent — production deployments inject
-// env vars through the MCP host config.
 loadDotenv();
 
 let clients: D4HClients;
@@ -45,7 +43,7 @@ console.error(
 
 const server = new McpServer({
   name: "mcp-d4h",
-  version: "0.1.0",
+  version: "0.2.0",
 });
 
 // ---------------------------------------------------------------------------
@@ -112,7 +110,7 @@ const paginationShape = {
 };
 
 // ---------------------------------------------------------------------------
-// Team Manager tools
+// Personnel
 // ---------------------------------------------------------------------------
 
 server.registerTool(
@@ -148,15 +146,78 @@ server.registerTool(
 );
 
 server.registerTool(
-  "get_member_efficiency",
+  "get_member",
   {
-    title: "Check member qualifications and training",
+    title: "Get a single D4H team member by ID",
     description:
-      "Retrieve qualifications and training awards held by team members " +
-      "(Team Manager `/member-qualifications`). Use this to assess a " +
-      "specific member's readiness by passing `member_id` (results are " +
-      "filtered client-side on `member.id`), or to audit qualifications " +
-      "across the team. Optionally filter by qualification title.",
+      "Fetch the full detail record for one team member from " +
+      "`/team/{teamId}/members/{id}`. Returns the same shape as a list entry " +
+      "but with the complete field set (custom fields, counters, contact " +
+      "info, etc.). Use after `get_members` when you need everything about " +
+      "a specific person.",
+    inputSchema: {
+      id: z
+        .number()
+        .int()
+        .describe("Numeric member ID (the `id` field from `get_members`)."),
+    },
+  },
+  async ({ id }): Promise<ToolResult> => {
+    try {
+      const tm = requireTeamManager();
+      const result = await tm.getMember(id);
+      return okJson(result);
+    } catch (err) {
+      return handleError("get_member", err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Qualifications
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "get_qualifications",
+  {
+    title: "List qualification DEFINITIONS (catalog)",
+    description:
+      "List the team's qualification definitions catalog from " +
+      "`/team/{teamId}/member-qualifications` — i.e. the templates / kinds of " +
+      "qualifications the team tracks (CPR, Swiftwater, etc.), with their " +
+      "default cost, reminder window, and expiry months. This is the CATALOG, " +
+      "not per-member awards. For 'who holds what and when does it expire', " +
+      "use `get_member_qualification_awards`.",
+    inputSchema: {
+      ...paginationShape,
+      title: z
+        .string()
+        .optional()
+        .describe("Filter by qualification title (e.g. 'CPR', 'Swiftwater')."),
+    },
+  },
+  async ({ page, size, title }): Promise<ToolResult> => {
+    try {
+      const tm = requireTeamManager();
+      const result = await tm.listMemberQualifications({ page, size, title });
+      return okJson(result);
+    } catch (err) {
+      return handleError("get_qualifications", err);
+    }
+  }
+);
+
+server.registerTool(
+  "get_member_qualification_awards",
+  {
+    title: "List per-member qualification awards (readiness data)",
+    description:
+      "List specific qualification AWARDS held by members from " +
+      "`/team/{teamId}/member-qualification-awards`. Each record links a " +
+      "member to a qualification with `startsAt` and `endsAt` (expiry). " +
+      "Use this for per-person readiness, expiring qualifications, and " +
+      "'who is current on X'. Optionally filter to a single member by " +
+      "passing `member_id` (server-side filter — verified working).",
     inputSchema: {
       ...paginationShape,
       member_id: z
@@ -164,30 +225,260 @@ server.registerTool(
         .int()
         .optional()
         .describe(
-          "Optional numeric member ID. When provided, results are filtered to qualifications owned by that member."
+          "Filter awards to those held by this member ID (server-side)."
         ),
-      title: z
-        .string()
-        .optional()
-        .describe("Filter by qualification title (e.g. 'CPR', 'Swiftwater')."),
     },
   },
-  async ({ page, size, member_id, title }): Promise<ToolResult> => {
+  async ({ page, size, member_id }): Promise<ToolResult> => {
     try {
       const tm = requireTeamManager();
-      const result = await tm.listMemberQualifications({ page, size, title });
-      if (member_id !== undefined) {
-        const filtered = result.results.filter(
-          (q) => q.member?.id === member_id
-        );
-        return okJson({ ...result, results: filtered, filteredByMemberId: member_id });
-      }
+      const result = await tm.listMemberQualificationAwards({
+        page,
+        size,
+        member_id,
+      });
       return okJson(result);
     } catch (err) {
-      return handleError("get_member_efficiency", err);
+      return handleError("get_member_qualification_awards", err);
     }
   }
 );
+
+// ---------------------------------------------------------------------------
+// Activities (incidents / events / exercises)
+// ---------------------------------------------------------------------------
+
+const activityListShape = {
+  ...paginationShape,
+  reference: z
+    .string()
+    .optional()
+    .describe(
+      "Filter by reference number / free-text reference search (e.g. '0001')."
+    ),
+  before: z
+    .string()
+    .optional()
+    .describe(
+      "ISO 8601 timestamp; only activities starting before this time."
+    ),
+  after: z
+    .string()
+    .optional()
+    .describe(
+      "ISO 8601 timestamp; only activities starting after this time."
+    ),
+};
+
+server.registerTool(
+  "get_incidents",
+  {
+    title: "List incidents",
+    description:
+      "List incidents (real responses) from `/team/{teamId}/incidents`. " +
+      "Use this to see ongoing or past operational incidents — distinct " +
+      "from training exercises and routine events. Pair with `get_incident` " +
+      "for full detail on a single record.",
+    inputSchema: activityListShape,
+  },
+  async (params): Promise<ToolResult> => {
+    try {
+      const tm = requireTeamManager();
+      const result = await tm.listIncidents(params);
+      return okJson(result);
+    } catch (err) {
+      return handleError("get_incidents", err);
+    }
+  }
+);
+
+server.registerTool(
+  "get_incident",
+  {
+    title: "Get a single incident by ID",
+    description:
+      "Fetch the full detail record for one incident from " +
+      "`/team/{teamId}/incidents/{id}`. Use after `get_incidents` when you " +
+      "need everything about a specific record (description, location, " +
+      "attendance counts, custom fields, etc.).",
+    inputSchema: {
+      id: z
+        .number()
+        .int()
+        .describe("Numeric incident ID (the `id` field from `get_incidents`)."),
+    },
+  },
+  async ({ id }): Promise<ToolResult> => {
+    try {
+      const tm = requireTeamManager();
+      const result = await tm.getIncident(id);
+      return okJson(result);
+    } catch (err) {
+      return handleError("get_incident", err);
+    }
+  }
+);
+
+server.registerTool(
+  "get_exercises",
+  {
+    title: "List training exercises",
+    description:
+      "List training exercises from `/team/{teamId}/exercises`. " +
+      "Exercises are practice / training activities — distinct from real " +
+      "incidents and routine events. Same record shape as incidents and " +
+      "events; `resourceType` is `Exercise`.",
+    inputSchema: activityListShape,
+  },
+  async (params): Promise<ToolResult> => {
+    try {
+      const tm = requireTeamManager();
+      const result = await tm.listExercises(params);
+      return okJson(result);
+    } catch (err) {
+      return handleError("get_exercises", err);
+    }
+  }
+);
+
+server.registerTool(
+  "get_events",
+  {
+    title: "List routine events",
+    description:
+      "List events from `/team/{teamId}/events`. Events are routine " +
+      "activities (meetings, community engagements, fundraisers) — distinct " +
+      "from incidents and exercises. Same record shape; `resourceType` is " +
+      "`Event`.",
+    inputSchema: activityListShape,
+  },
+  async (params): Promise<ToolResult> => {
+    try {
+      const tm = requireTeamManager();
+      const result = await tm.listEvents(params);
+      return okJson(result);
+    } catch (err) {
+      return handleError("get_events", err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Attendance
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "get_attendance",
+  {
+    title: "List attendance records",
+    description:
+      "List attendance records from `/team/{teamId}/attendance`. Each " +
+      "record links a member to an activity (incident/event/exercise) with " +
+      "a status (ATTENDING / ABSENT / ...) and duration. Use this to answer " +
+      "'who attended what', participation rates, and individual call-out " +
+      "history. Filter by `member_id` to see one person's history.",
+    inputSchema: {
+      ...paginationShape,
+      member_id: z
+        .number()
+        .int()
+        .optional()
+        .describe("Filter to attendance records for this member ID."),
+      status: z
+        .string()
+        .optional()
+        .describe(
+          "Filter by attendance status (e.g. 'ATTENDING', 'ABSENT')."
+        ),
+    },
+  },
+  async (params): Promise<ToolResult> => {
+    try {
+      const tm = requireTeamManager();
+      const result = await tm.listAttendance(params);
+      return okJson(result);
+    } catch (err) {
+      return handleError("get_attendance", err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Groups
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "get_groups",
+  {
+    title: "List personnel groups (sub-teams)",
+    description:
+      "List the team's personnel groups from " +
+      "`/team/{teamId}/member-groups` — sub-teams / cells like 'ground team A', " +
+      "'rope rescue', 'tech rescue'. Use to see how the team is organized. " +
+      "For K9 ops (handlers / animals), D4H exposes separate endpoints not " +
+      "wrapped in this server.",
+    inputSchema: {
+      ...paginationShape,
+      title: z
+        .string()
+        .optional()
+        .describe("Filter by group title."),
+    },
+  },
+  async (params): Promise<ToolResult> => {
+    try {
+      const tm = requireTeamManager();
+      const result = await tm.listMemberGroups(params);
+      return okJson(result);
+    } catch (err) {
+      return handleError("get_groups", err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tasks
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "get_tasks",
+  {
+    title: "List tasks",
+    description:
+      "List tasks from `/team/{teamId}/tasks`. Tasks are TODO items " +
+      "(action items, follow-ups, equipment repairs) optionally assigned to " +
+      "members and optionally linked to a target resource (e.g. an incident " +
+      "or piece of equipment). Use this for outstanding action items and " +
+      "completion tracking.",
+    inputSchema: {
+      ...paginationShape,
+      status: z
+        .string()
+        .optional()
+        .describe(
+          "Filter by task status (e.g. 'NOT_STARTED', 'IN_PROGRESS', 'COMPLETED')."
+        ),
+      assigned_member_id: z
+        .number()
+        .int()
+        .optional()
+        .describe("Filter to tasks assigned to this member ID."),
+    },
+  },
+  async (params): Promise<ToolResult> => {
+    try {
+      const tm = requireTeamManager();
+      const result = await tm.listTasks(params);
+      return okJson(result);
+    } catch (err) {
+      return handleError("get_tasks", err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Equipment
+// ---------------------------------------------------------------------------
 
 server.registerTool(
   "get_equipment",
@@ -248,6 +539,55 @@ server.registerTool(
       return okJson(result);
     } catch (err) {
       return handleError("get_equipment", err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Global search
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "search_team",
+  {
+    title: "Global search across team resources",
+    description:
+      "Run a heterogeneous global search via `/team/{teamId}/search`. " +
+      "Returns mixed results (members, incidents, equipment, etc.) where " +
+      "each hit carries a `resourceType` indicating what kind it is. Use " +
+      "when the LLM doesn't know which resource type a term refers to (e.g. " +
+      "a name might be a person, a vehicle, or an incident reference). " +
+      "Note: the envelope's `totalSize` is `-1` for this endpoint — the " +
+      "registry doesn't compute it.",
+    inputSchema: {
+      query: z
+        .string()
+        .min(1)
+        .describe("The search query string. Required."),
+      ...paginationShape,
+      resource_type: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Restrict results to specific resource types (e.g. ['Member', 'Incident'])."
+        ),
+      sort: z
+        .string()
+        .optional()
+        .describe("Sort field name."),
+      order: z
+        .string()
+        .optional()
+        .describe("Sort order: typically 'asc' or 'desc'."),
+    },
+  },
+  async (params): Promise<ToolResult> => {
+    try {
+      const tm = requireTeamManager();
+      const result = await tm.searchTeam(params);
+      return okJson(result);
+    } catch (err) {
+      return handleError("search_team", err);
     }
   }
 );

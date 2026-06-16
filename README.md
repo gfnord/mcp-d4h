@@ -28,14 +28,32 @@
 
 ## Tools
 
-| Tool                    | What it does                                                            |
-|-------------------------|-------------------------------------------------------------------------|
-| `get_members`           | List/search team members with status, role, and contact info.           |
-| `get_member_efficiency` | List qualifications and training awards (optionally per-member).        |
-| `get_equipment`         | Search equipment inventory by status, location, owner, kind, ref, etc.  |
+**13 tools** across personnel, qualifications, activities, attendance, groups,
+tasks, equipment, and global search.
+
+| Tool                              | What it does                                                                  |
+|-----------------------------------|-------------------------------------------------------------------------------|
+| `get_members`                     | List/search team members by status, role, contact info.                       |
+| `get_member`                      | Get the full detail record for one team member by ID.                         |
+| `get_qualifications`              | List the qualification **catalog** (templates/definitions).                   |
+| `get_member_qualification_awards` | List per-member qualification awards (who holds what, expiry dates).          |
+| `get_incidents`                   | List incidents (real responses).                                              |
+| `get_incident`                    | Get the full detail record for one incident by ID.                            |
+| `get_exercises`                   | List training exercises.                                                      |
+| `get_events`                      | List routine events (meetings, fundraisers, etc.).                            |
+| `get_attendance`                  | List attendance records (who attended what, with duration).                   |
+| `get_groups`                      | List personnel groups (sub-teams).                                            |
+| `get_tasks`                       | List tasks (action items, follow-ups, repairs).                               |
+| `get_equipment`                   | Search equipment inventory by status, location, owner, kind, ref, etc.        |
+| `search_team`                     | Heterogeneous global search across all resource types.                        |
 
 All tools return structured JSON. Errors come back as MCP error results with a
 descriptive message — the server itself never crashes on a failed API call.
+
+> **⚠️ v0.2.0 breaking change**: the previous `get_member_efficiency` tool was
+> renamed to `get_qualifications` (and its description corrected — the
+> endpoint returns the qualification catalog, not per-member awards). For
+> per-member readiness data, use the new `get_member_qualification_awards`.
 
 See **[docs/tools.md](./docs/tools.md)** for full input schemas, examples, and
 output shapes.
