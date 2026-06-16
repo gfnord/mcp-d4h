@@ -1,0 +1,53 @@
+{
+  "name": "mcp-d4h",
+  "version": "0.1.0",
+  "description": "Model Context Protocol (MCP) server exposing the D4H Team Manager API (spec v7.0.1, URL prefix /v3) to LLM hosts.",
+  "type": "module",
+  "bin": {
+    "mcp-d4h": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "d4h",
+    "team-manager",
+    "emergency-management",
+    "claude"
+  ],
+  "author": "gfnord",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gfnord/mcp-d4h.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gfnord/mcp-d4h/issues"
+  },
+  "homepage": "https://github.com/gfnord/mcp-d4h#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.0",
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "typescript": "^5.6.0"
+  }
+}
