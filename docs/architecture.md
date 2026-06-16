@@ -19,20 +19,26 @@ flowchart LR
     subgraph mcp-d4h
       Boot["Bootstrap<br/>src/index.ts (top)"]
       Server["McpServer<br/>(@modelcontextprotocol/sdk)"]
-      Tools["3 Registered Tools<br/>get_members, get_member_efficiency, get_equipment"]
+      ReadTools["13 Read Tools<br/>get_*, search_team"]
+      MutTools["9 Mutating Tools<br/>create_*, update_*, add_member_qualification<br/>(default dry_run: true)"]
+      Stubs["3 Unavailable Stubs<br/>assign/unassign_equipment_to_member,<br/>update_member_qualification"]
       Client["Team Manager Client<br/>src/d4h.ts"]
-      ErrModel["D4HApiError<br/>+ handleError"]
+      ErrModel["D4HApiError<br/>+ handleError<br/>+ needsMoreInfo / unavailable / dryRun"]
     end
 
     TM["D4H Team Manager API<br/>api.team-manager.&lt;region&gt;.d4h.com/v3"]
 
     Host <-- stdio JSON-RPC --> Server
     Boot -->|builds & registers| Server
-    Server --> Tools
-    Tools -->|invokes typed methods| Client
+    Server --> ReadTools
+    Server --> MutTools
+    Server --> Stubs
+    ReadTools -->|invokes typed methods| Client
+    MutTools -->|on dry_run:false, invokes typed methods| Client
+    Stubs -->|short-circuits, no API call| ErrModel
     Client -->|HTTPS Bearer PAT| TM
     Client -->|axios errors| ErrModel
-    ErrModel -->|isError: true result| Server
+    ErrModel -->|isError result + _meta marker| Server
 ```
 
 **Wire protocol**: MCP JSON-RPC framed as one JSON message per line over
@@ -63,8 +69,8 @@ Responsibilities:
    [mcp-d4h] Region=US TeamManager=configured
    ```
 
-4. Construct the `McpServer`, register the 3 tools, connect a
-   `StdioServerTransport`.
+4. Construct the `McpServer`, register the 25 tools (13 read + 9 mutating
+   + 3 unavailable stubs), connect a `StdioServerTransport`.
 
 ### 2.2 Team Manager Client — [`src/d4h.ts`](../src/d4h.ts)
 
@@ -83,15 +89,46 @@ Design choices:
 ### 2.3 MCP Server — middle of [`src/index.ts`](../src/index.ts)
 
 Uses `McpServer.registerTool(name, config, handler)` from the official SDK
-(v1.x). Each tool:
+(v1.x). The tool layer has three kinds of handlers, sharing the same
+registration shape but with different middleware:
 
-1. Declares a **Zod input schema** with `.describe()` annotations on every
-   field (the LLM uses these descriptions to drive parameter selection).
-2. Calls `requireTeamManager()` — this throws a precise error string if the
-   client isn't configured, which `handleError` converts into an MCP error
-   result.
-3. Returns either `okJson(data)` (structured `text` content of JSON) or, on
-   failure, an `isError: true` result.
+**Read tools** (13) — `get_*` and `search_team`:
+
+1. Declares a Zod input schema with `.describe()` on every field.
+2. Calls `requireTeamManager()` → throws if client not configured.
+3. Returns `okJson(data)` on success or `handleError(name, err)` on failure.
+
+**Mutating tools** (9) — `create_*`, `update_*`, `add_member_qualification`:
+
+1. Schema includes the shared `dryRunShape` (`dry_run: boolean`, default `true`).
+2. Runs domain validation via `validateActivityMinimums` (activity creates)
+   or `rejectIfNoUpdateFields` (updates). If anything is missing or invalid,
+   short-circuits with **`needsMoreInfo`** — a question-phrased text response
+   plus a machine-readable `_meta["mcp-d4h/needsMoreInfo"]` block. **No API
+   call is made.**
+3. If `dry_run` is true (default), builds a structured **`previewRequest`**
+   response showing the exact resolved URL, method, and body that *would*
+   be sent. No API call.
+4. If `dry_run` is false, calls the corresponding client method and returns
+   `okJson(data)` or `handleError`.
+
+**Unavailable stubs** (3) — `assign_equipment_to_member`,
+`unassign_equipment_from_member`, `update_member_qualification`:
+
+1. Schema is declared for LLM discoverability (so it knows the tool exists
+   and what it would take).
+2. Handler immediately returns an **`unavailable`** response with
+   `_meta["mcp-d4h/unavailable"] = true` and a precise reason pointing at
+   the D4H web interface. **No API call is ever made.** Each stub was
+   verified via live probing — `update_member_qualification` because the
+   spec exposes no PATCH/PUT verb on `/member-qualification-awards`, and
+   the equipment assign/unassign pair because PATCH `/equipment/{id}`
+   rejects every variant of location/member/assignedTo fields with HTTP
+   400 (the spec is in fact authoritative here).
+
+All three response classes set `isError: true` if they refuse to act (so
+hosts surface them visibly), and tag themselves via `_meta` with a
+namespaced key (`mcp-d4h/...`) so structured hosts can differentiate.
 
 ### 2.4 Transport — bottom of [`src/index.ts`](../src/index.ts)
 
@@ -134,6 +171,49 @@ sequenceDiagram
 **Critical invariant**: every byte ever written to **stdout** is part of the
 MCP wire protocol. Every log line goes to **stderr** via `console.error`.
 
+### Mutating tool lifecycle (with `dry_run` and `needsMoreInfo`)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant H as MCP Host
+    participant S as McpServer
+    participant T as Tool Handler
+    participant C as Team Manager Client
+    participant API as D4H Team Manager API
+
+    H->>S: tools/call create_event { startsAt, ... }
+    S->>S: validate against Zod schema (incl. dry_run default=true)
+    S->>T: handler({ dry_run, ...args })
+    T->>T: validateActivityMinimums(args)
+    alt missing or invalid fields
+      T-->>S: needsMoreInfo response (isError=true, _meta marker)
+      S-->>H: question-phrased text — LLM asks user
+    else inputs OK
+      T->>T: requireTeamManager() + requireTeamId()
+      alt dry_run = true (default)
+        T-->>S: previewRequest (resolved URL + body, no API call)
+        S-->>H: dry-run preview for review
+      else dry_run = false
+        T->>C: client.createEvent(body)
+        C->>API: HTTPS POST /v3/team/{id}/events
+        API-->>C: created record (or HTTP error)
+        alt success
+          C-->>T: typed result
+          T-->>S: okJson(result)
+        else axios error
+          C-->>T: throws D4HApiError
+          T-->>S: handleError → isError result with verbatim API body
+        end
+      end
+    end
+    S-->>H: JSON-RPC response (stdout)
+```
+
+The unavailable-stub flow is even simpler: the handler skips every step
+above and returns the `unavailable` response immediately after Zod
+validation.
+
 ---
 
 ## 4. Error model
@@ -141,17 +221,25 @@ MCP wire protocol. Every log line goes to **stderr** via `console.error`.
 All errors funnel through a single shape so the LLM gets a uniform
 explanation regardless of where the failure came from.
 
-| Source | Class / Path | Surfaced as |
-|--------|--------------|-------------|
-| Missing credentials | `requireTeamManager()` throws `Error` | `isError: true`, `"Error: Unexpected error: Team Manager client is not configured. Set D4H_TEAM_MANAGER_API_KEY and D4H_TEAM_ID."` |
-| HTTP non-2xx from D4H | `D4HApiError` | `isError: true`, `"Error: D4H API /team/12345/members failed (HTTP 401): {...}"` |
-| Network / timeout | `D4HApiError` (no `status`) | `isError: true`, includes axios's message |
-| Programmer bug | generic `Error` | `isError: true`, `"Error: Unexpected error: ..."` (also logged to stderr) |
-| Schema validation | thrown by Zod inside SDK before handler runs | standard MCP JSON-RPC error reply |
+| Source | Class / Path | Surfaced as | `_meta` marker |
+|--------|--------------|-------------|----------------|
+| Missing credentials | `requireTeamManager()` throws `Error` | `isError: true`, `"Error: Unexpected error: Team Manager client is not configured. ..."` | — |
+| HTTP non-2xx from D4H | `D4HApiError` | `isError: true`, `"Error: D4H API /team/12345/members failed (HTTP 401): {...}"` | — |
+| Network / timeout | `D4HApiError` (no `status`) | `isError: true`, includes axios's message | — |
+| Programmer bug | generic `Error` | `isError: true`, `"Error: Unexpected error: ..."` (also logged to stderr) | — |
+| Schema validation | thrown by Zod inside SDK before handler runs | standard MCP JSON-RPC error reply | — |
+| **Missing/invalid mutating input** | `validateActivityMinimums` / `rejectIfNoUpdateFields` | `isError: true`, question-phrased text — LLM relays as user prompt. No API call. | `mcp-d4h/needsMoreInfo: true` + structured `missing[]` / `invalid[]` |
+| **Unavailable endpoint** | stub handler (e.g. PATCH `/member-qualification-awards` not in spec) | `isError: true`, reason text pointing at the D4H web interface. No API call. | `mcp-d4h/unavailable: true` + `specVersion` |
+| **Dry-run preview** | `previewRequest` (mutating tools when `dry_run !== false`) | `isError: false` (not an error). JSON preview of the would-be request. No API call. | `mcp-d4h/dryRun: true` + resolved `preview` |
 
 `D4HApiError` carries `status`, `endpoint`, and a **truncated** JSON summary
 of the response body (max 500 chars) so error messages are useful without
 dumping huge payloads at the LLM.
+
+The three new `_meta`-tagged response classes (`needsMoreInfo`,
+`unavailable`, `dryRun`) let MCP hosts that inspect `_meta` render them
+distinctly (e.g. "needs your input" UI vs an actual error). Hosts that
+only read `text` content fall back to the human-readable message.
 
 ---
 
@@ -190,7 +278,9 @@ No other call sites need to change.
 | Need | Where to extend |
 |------|-----------------|
 | New D4H endpoint | Add a typed method to `TeamManagerClient` in `src/d4h.ts`. |
-| New MCP tool | Add `server.registerTool(...)` block in `src/index.ts` and a Zod schema. Reuse `okJson` / `handleError`. |
+| New **read** MCP tool | Add `server.registerTool(...)` block in `src/index.ts` and a Zod schema. Reuse `okJson` / `handleError`. |
+| New **mutating** MCP tool | Same as above plus: add `...dryRunShape` to the inputSchema; call domain validation before the `dry_run` branch; on `dry_run` true return `previewRequest(name, method, path, body)`; on `dry_run` false call the client and return `okJson`. |
+| Tool that's known unsupported by API | Register schema for discoverability, handler immediately returns `unavailable(name, reason)`. |
 | New region | Append to `REGION_HOSTS` + `D4HRegion` union. |
 | Pagination helper | Wrap the client's list methods with an async iterator that follows the `totalSize`/`page` envelope. |
 | Resource exposure (read-only MCP `resources/`) | Add `server.registerResource(...)` next to the tools — the SDK exposes the same factory pattern. |

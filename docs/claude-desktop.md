@@ -202,7 +202,10 @@ In a new conversation, look for the tool indicator in the input area
 (🔧 / "Search and tools" / similar — UI varies by version). You should see:
 
 - A server named **`d4h`**
-- With **3 tools**: `get_members`, `get_member_efficiency`, `get_equipment`
+- With **25 tools** total, grouped as:
+  - **13 read tools** — `get_members`, `get_member`, `get_qualifications`, `get_member_qualification_awards`, `get_incidents`, `get_incident`, `get_exercises`, `get_events`, `get_attendance`, `get_groups`, `get_tasks`, `get_equipment`, `search_team`
+  - **9 mutating tools** — `create_event`, `create_exercise`, `create_incident`, `update_event`, `update_exercise`, `update_incident`, `create_equipment`, `update_equipment`, `add_member_qualification` (all default to `dry_run: true` — preview before sending)
+  - **3 unavailable stubs** — `assign_equipment_to_member`, `unassign_equipment_from_member`, `update_member_qualification` (registered for discoverability; return a structured "unavailable" response pointing at the D4H web interface)
 
 If `d4h` is missing or shows 0 tools, check the Claude Desktop MCP log:
 
@@ -227,9 +230,9 @@ Re-check the JSON for typos, trailing commas, or quote mismatches.
 
 ## 6. Smoke-test with real prompts
 
-Try these in a new Claude conversation:
+Try these in a new Claude conversation, in order of risk.
 
-### Test `get_members`
+### Read tool — `get_members`
 
 > List my **operational** D4H team members — give me the first 5 with their
 > name and position.
@@ -239,23 +242,68 @@ What happens:
 2. You see a "Used **d4h**" / 🔧 indicator in the response.
 3. Claude formats the JSON response into a readable list.
 
-### Test `get_member_efficiency`
+### Read tool — `get_member_qualification_awards`
 
 > What qualifications does member ID **12345** hold? Are any expiring
 > in the next 90 days?
 
-→ calls `get_member_efficiency` with `{ member_id: 12345 }`.
+→ Claude calls `get_member_qualification_awards` with `{ member_id: 12345 }`,
+then filters/highlights records with an `endsAt` inside the 90-day window.
 
-### Test `get_equipment`
+### Read tool — `get_equipment`
 
 > Show me all operational handheld radios in the team inventory, with their
 > reference numbers and current locations.
 
-→ calls `get_equipment` with `{ status: "OPERATIONAL", text: "radio" }`.
+→ Claude calls `get_equipment` with `{ status: "OPERATIONAL", text: "radio" }`.
 
-If these come back with sensible data, **end-to-end is working**. You can
-now ask Claude any question that requires reading team personnel,
-qualifications, or equipment.
+### Mutating tool — `dry_run` flow (safe — no API call)
+
+> Plan creating an exercise titled "Saturday rope rescue" from 8 AM to 4 PM
+> next Saturday.
+
+What happens:
+1. Claude calls `create_exercise` with `{ startsAt, endsAt, referenceDescription }`.
+2. Because `dry_run` defaults to **true**, the server returns a **preview**:
+   the resolved `POST https://api.team-manager.<region>.d4h.com/v3/team/<id>/exercises`
+   URL and the JSON body that *would* be sent.
+3. Claude shows you the preview. Nothing was sent to D4H.
+
+### Mutating tool — `needsMoreInfo` flow
+
+> Schedule an exercise called "Quick swiftwater drill" for 9 AM Sunday.
+
+What happens:
+1. Claude calls `create_exercise` with `startsAt` and `referenceDescription` but **no `endsAt`**.
+2. Server returns `needsMoreInfo`: *"Cannot create this exercise yet. I still
+   need: end time (endsAt) — ISO 8601 datetime. What is the end time?"*
+3. Claude relays the question to you. **Nothing was sent to D4H** — no
+   fabricated default `endsAt`.
+
+### Unavailable stub
+
+> Assign equipment 204937 to member 20816.
+
+What happens:
+1. Claude calls `assign_equipment_to_member`.
+2. Server returns the `unavailable` response explaining that PATCH `/equipment/{id}`
+   rejects location-mutating fields and pointing at the D4H web interface.
+3. Claude relays the unavailability and (typically) suggests the web UI.
+
+### Mutating tool — actual send (`dry_run: false`)
+
+Only after you've previewed and reviewed:
+
+> Now actually create that exercise.
+
+→ Claude re-invokes `create_exercise` with `dry_run: false`. The record is
+created in D4H. You receive the created record back.
+
+If the read prompts return sensible data and the mutating flow goes
+dry-run → preview → review → send without surprises, **end-to-end is
+working**. You can now use Claude to read personnel, qualifications,
+incidents, equipment, and (with `dry_run: false` confirmation) to create
+events, exercises, incidents, equipment items, and qualification awards.
 
 ---
 
@@ -303,7 +351,7 @@ Release history: [GitHub Releases](https://github.com/gfnord/mcp-d4h/releases).
 ## See also
 
 - [README](../README.md) — project overview and quick start
-- [docs/tools.md](./tools.md) — full input/output reference for the 3 tools
+- [docs/tools.md](./tools.md) — full input/output reference for all 25 tools (read, mutating, and unavailable stubs)
 - [docs/configuration.md](./configuration.md) — env vars, PAT generation, region details
 - [docs/architecture.md](./architecture.md) — how the server is wired internally
 - [docs/development.md](./development.md) — dev workflow, adding tools, release process
