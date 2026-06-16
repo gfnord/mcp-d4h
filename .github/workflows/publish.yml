@@ -7,16 +7,23 @@ name: Publish package
 #   npm version patch          # bumps version + creates tag locally
 #   git push --follow-tags     # pushes the tag, fires this workflow
 #
-# Required secret:
-#   NPM_TOKEN   - npm Automation token (https://www.npmjs.com/settings/<user>/tokens)
+# Auth model:
+#   - npm public registry  -> Trusted Publishing (OIDC). NO long-lived secret.
+#                             Configure once at https://www.npmjs.com/package/@gfnord/mcp-d4h/access
+#                             with publisher=GitHub Actions, repo=gfnord/mcp-d4h,
+#                             workflow=publish.yml. The id-token:write permission
+#                             on the publish-npm job lets npm verify the OIDC
+#                             token and mint a short-lived publish credential
+#                             scoped to this run.
+#   - GitHub Packages      -> GITHUB_TOKEN (provided automatically by Actions
+#                             when permissions.packages:write is granted).
 #
-# GITHUB_TOKEN is provided automatically by Actions and has packages:write
-# scope as long as the workflow's `permissions:` block includes it.
+# Trusted Publishing requires npm CLI >= 11.5.1, which is newer than what
+# Node 22 LTS ships with. We explicitly upgrade npm before publish.
 #
 # Security note: this workflow does NOT consume any untrusted input
 # (issue titles, PR descriptions, commit messages, etc.). It only reacts to
-# tag refs and uses secrets via NODE_AUTH_TOKEN, which is the documented
-# pattern for actions/setup-node + npm publish.
+# tag refs and uses an OIDC token whose audience is scoped to npm.
 
 on:
   push:
@@ -65,6 +72,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # id-token:write is REQUIRED for Trusted Publishing OIDC exchange + provenance.
       id-token: write
     steps:
       - uses: actions/download-artifact@v4
@@ -73,17 +81,25 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
           scope: '@gfnord'
+
+      - name: Upgrade npm to a version that supports Trusted Publishing
+        # Trusted Publishing OIDC was added in npm 11.5.1. Node 22 LTS ships
+        # with npm 10.x, so we bump explicitly here. Safe and idempotent.
+        run: npm install -g npm@latest
 
       - name: Publish
         # --ignore-scripts skips prepublishOnly (which would re-run tsc against
         # an artifact that has no src/). Build was already verified in the
         # build job; we ship those exact bytes.
+        #
+        # No NODE_AUTH_TOKEN here: npm CLI auto-detects the GitHub Actions
+        # OIDC token (via ACTIONS_ID_TOKEN_REQUEST_URL / _TOKEN env vars that
+        # the runner sets when id-token:write is granted) and exchanges it
+        # with npm for a short-lived publish credential.
         run: npm publish --ignore-scripts --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-github:
     name: Publish to GitHub Packages
