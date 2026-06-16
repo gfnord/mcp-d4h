@@ -78,7 +78,10 @@ jobs:
           scope: '@gfnord'
 
       - name: Publish
-        run: npm publish --provenance --access public
+        # --ignore-scripts skips prepublishOnly (which would re-run tsc against
+        # an artifact that has no src/). Build was already verified in the
+        # build job; we ship those exact bytes.
+        run: npm publish --ignore-scripts --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -101,6 +104,7 @@ jobs:
           scope: '@gfnord'
 
       - name: Publish
-        run: npm publish
+        # --ignore-scripts: same reasoning as the npm job above.
+        run: npm publish --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
