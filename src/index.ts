@@ -19,6 +19,12 @@ import {
   buildClientsFromEnv,
   D4HApiError,
   D4HClients,
+  REGION_HOSTS,
+  EquipmentCreateBody,
+  EquipmentUpdateBody,
+  ActivityCreateBody,
+  ActivityUpdateBody,
+  MemberQualificationAwardCreateBody,
 } from "./d4h.js";
 
 // ---------------------------------------------------------------------------
@@ -43,7 +49,7 @@ console.error(
 
 const server = new McpServer({
   name: "mcp-d4h",
-  version: "0.2.0",
+  version: "0.3.0",
 });
 
 // ---------------------------------------------------------------------------
@@ -53,6 +59,7 @@ const server = new McpServer({
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
   isError?: boolean;
+  _meta?: Record<string, unknown>;
 };
 
 function okJson(value: unknown): ToolResult {
@@ -589,6 +596,913 @@ server.registerTool(
     } catch (err) {
       return handleError("search_team", err);
     }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Write-tool helpers (dry_run preview, validation, needsMoreInfo, unavailable)
+// ---------------------------------------------------------------------------
+
+const dryRunShape = {
+  dry_run: z
+    .boolean()
+    .default(true)
+    .describe(
+      "When true (default), preview the request without sending it. Set false to actually send."
+    ),
+};
+
+interface MissingField {
+  field: string;
+  label: string;
+  expected: string;
+  example: string;
+  reason: string;
+}
+
+interface InvalidField {
+  field: string;
+  reason: string;
+}
+
+function requireTeamId(): string {
+  if (!clients.teamId) {
+    throw new Error(
+      "Team Manager client is not configured. Set D4H_TEAM_MANAGER_API_KEY and D4H_TEAM_ID."
+    );
+  }
+  return clients.teamId;
+}
+
+function previewRequest(
+  toolName: string,
+  method: "POST" | "PATCH",
+  path: string,
+  body: unknown
+): ToolResult {
+  const host = REGION_HOSTS[clients.region];
+  const url = `https://${host}/v3${path}`;
+  const preview = {
+    dry_run: true,
+    note:
+      "DRY RUN. No request was sent. Re-invoke with `dry_run: false` to actually send the request.",
+    request: {
+      method,
+      url,
+      headers: {
+        Authorization: "Bearer <REDACTED>",
+        "Content-Type": "application/json",
+      },
+      body,
+    },
+  };
+  return {
+    content: [{ type: "text", text: JSON.stringify(preview, null, 2) }],
+    _meta: {
+      "mcp-d4h/dryRun": true,
+      "mcp-d4h/tool": toolName,
+      "mcp-d4h/preview": preview.request,
+    },
+  };
+}
+
+function needsMoreInfo(
+  toolName: string,
+  missing: MissingField[],
+  invalid: InvalidField[]
+): ToolResult {
+  const lines: string[] = [];
+  const verb = toolName.startsWith("create_")
+    ? `create this ${toolName.slice(7).replace(/_/g, " ")}`
+    : toolName.startsWith("update_")
+    ? `update this ${toolName.slice(7).replace(/_/g, " ")}`
+    : toolName.replace(/_/g, " ");
+  lines.push(`Cannot ${verb} yet.`);
+
+  if (missing.length > 0) {
+    lines.push("");
+    lines.push("I still need:");
+    for (const m of missing) {
+      lines.push(
+        `  • ${m.label} (${m.field}) — ${m.expected}, e.g. ${JSON.stringify(m.example)}`
+      );
+    }
+  }
+
+  if (invalid.length > 0) {
+    lines.push("");
+    lines.push("Invalid input:");
+    for (const i of invalid) {
+      lines.push(`  • ${i.field}: ${i.reason}`);
+    }
+  }
+
+  if (missing.length === 1 && invalid.length === 0) {
+    lines.push("");
+    lines.push(`What is the ${missing[0].label}?`);
+  } else if (missing.length > 1 && invalid.length === 0) {
+    lines.push("");
+    lines.push(
+      `Please provide ${missing.map((m) => m.label).join(", ")}.`
+    );
+  } else if (invalid.length > 0 && missing.length === 0) {
+    lines.push("");
+    lines.push("Please correct the invalid fields.");
+  } else if (invalid.length > 0 && missing.length > 0) {
+    lines.push("");
+    lines.push(
+      `Please correct the invalid fields and supply the missing ones (${missing
+        .map((m) => m.label)
+        .join(", ")}).`
+    );
+  }
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+    isError: true,
+    _meta: {
+      "mcp-d4h/needsMoreInfo": true,
+      "mcp-d4h/tool": toolName,
+      "mcp-d4h/missing": missing,
+      "mcp-d4h/invalid": invalid,
+    },
+  };
+}
+
+function unavailable(toolName: string, reason: string): ToolResult {
+  return {
+    content: [{ type: "text", text: `${toolName}: ${reason}` }],
+    isError: true,
+    _meta: {
+      "mcp-d4h/unavailable": true,
+      "mcp-d4h/tool": toolName,
+      "mcp-d4h/specVersion": "7.0.1",
+    },
+  };
+}
+
+/** Broad ISO 8601 datetime check; lets the API do strict parsing. */
+function isIsoDateTime(s: unknown): s is string {
+  return (
+    typeof s === "string" &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/.test(s)
+  );
+}
+
+interface ActivityArgs {
+  startsAt?: string;
+  endsAt?: string;
+  referenceDescription?: string;
+}
+
+type ValidationResult =
+  | { ok: true }
+  | { ok: false; missing: MissingField[]; invalid: InvalidField[] };
+
+function validateActivityMinimums(
+  args: ActivityArgs,
+  opts: { kind: "event" | "exercise" | "incident"; requireEndsAt: boolean }
+): ValidationResult {
+  const missing: MissingField[] = [];
+  const invalid: InvalidField[] = [];
+
+  if (!args.startsAt) {
+    missing.push({
+      field: "startsAt",
+      label: "start time",
+      expected: "ISO 8601 datetime",
+      example: "2026-06-20T08:00:00Z",
+      reason: `required_for_${opts.kind}`,
+    });
+  } else if (!isIsoDateTime(args.startsAt)) {
+    invalid.push({
+      field: "startsAt",
+      reason: `not a valid ISO 8601 datetime (got ${JSON.stringify(args.startsAt)})`,
+    });
+  }
+
+  if (!args.referenceDescription) {
+    missing.push({
+      field: "referenceDescription",
+      label: "title",
+      expected: `short text describing the ${opts.kind}`,
+      example: `Tuesday rope rescue ${opts.kind}`,
+      reason: `required_for_${opts.kind}`,
+    });
+  }
+
+  if (opts.requireEndsAt) {
+    if (!args.endsAt) {
+      missing.push({
+        field: "endsAt",
+        label: "end time",
+        expected: "ISO 8601 datetime",
+        example: "2026-06-20T16:00:00Z",
+        reason: `required_for_${opts.kind}`,
+      });
+    } else if (!isIsoDateTime(args.endsAt)) {
+      invalid.push({
+        field: "endsAt",
+        reason: `not a valid ISO 8601 datetime (got ${JSON.stringify(args.endsAt)})`,
+      });
+    }
+  } else if (args.endsAt && !isIsoDateTime(args.endsAt)) {
+    invalid.push({
+      field: "endsAt",
+      reason: `not a valid ISO 8601 datetime (got ${JSON.stringify(args.endsAt)})`,
+    });
+  }
+
+  if (
+    args.startsAt &&
+    args.endsAt &&
+    isIsoDateTime(args.startsAt) &&
+    isIsoDateTime(args.endsAt) &&
+    new Date(args.endsAt) < new Date(args.startsAt)
+  ) {
+    invalid.push({
+      field: "endsAt",
+      reason: `endsAt (${args.endsAt}) is earlier than startsAt (${args.startsAt}). End must be at or after start.`,
+    });
+  }
+
+  if (missing.length === 0 && invalid.length === 0) return { ok: true };
+  return { ok: false, missing, invalid };
+}
+
+function stripUndefined<T extends Record<string, unknown>>(o: T): Partial<T> {
+  const out: Partial<T> = {};
+  for (const k in o) {
+    if (o[k] !== undefined) out[k] = o[k];
+  }
+  return out;
+}
+
+function rejectIfNoUpdateFields(
+  args: Record<string, unknown>,
+  toolName: string
+): ToolResult | null {
+  const has = Object.keys(args).some((k) => args[k] !== undefined);
+  if (!has) {
+    return needsMoreInfo(toolName, [], [
+      {
+        field: "(body)",
+        reason: "no fields to update — provide at least one field to change",
+      },
+    ]);
+  }
+  return null;
+}
+
+const activityCreateShape = {
+  startsAt: z
+    .string()
+    .describe(
+      "ISO 8601 datetime when the activity starts. e.g. \"2026-06-20T08:00:00Z\""
+    ),
+  endsAt: z
+    .string()
+    .optional()
+    .describe(
+      "ISO 8601 datetime when the activity ends. Required for events and exercises; optional for incidents (set later via update_incident)."
+    ),
+  referenceDescription: z
+    .string()
+    .describe(
+      "Short title shown in lists. e.g. \"Tuesday rope rescue exercise\""
+    ),
+  reference: z
+    .string()
+    .optional()
+    .describe("Manual reference code. D4H auto-assigns one if omitted."),
+  description: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("Long description. Supports HTML."),
+  plan: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("Operational plan. Supports HTML."),
+  trackingNumber: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("External tracking number."),
+  shared: z
+    .boolean()
+    .optional()
+    .describe("Whether the activity is shared across the organisation."),
+  fullTeam: z
+    .boolean()
+    .optional()
+    .describe("Whether the activity requires the full team."),
+  address: z
+    .record(z.unknown())
+    .optional()
+    .describe("Physical address object (street, country, postcode, etc.)."),
+  location: z
+    .record(z.unknown())
+    .optional()
+    .describe("Geographic location object (lat/lon geometry)."),
+  locationBookmarkId: z
+    .number()
+    .int()
+    .optional()
+    .describe("Numeric ID of a saved location bookmark."),
+  customFieldValues: z
+    .array(z.unknown())
+    .optional()
+    .describe("Array of {customFieldId, value} objects."),
+};
+
+const activityUpdateShape = {
+  startsAt: z.string().optional().describe("ISO 8601 datetime."),
+  endsAt: z.string().optional().describe("ISO 8601 datetime."),
+  referenceDescription: z.string().optional().describe("Short title."),
+  reference: z.string().optional().describe("Manual reference code."),
+  description: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("Long description. Supports HTML."),
+  plan: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("Operational plan. Supports HTML."),
+  trackingNumber: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("External tracking number."),
+  shared: z.boolean().optional().describe("Shared across organisation."),
+  fullTeam: z.boolean().optional().describe("Requires full team."),
+  address: z.record(z.unknown()).optional().describe("Physical address."),
+  location: z.record(z.unknown()).optional().describe("Geographic location."),
+  locationBookmarkId: z
+    .number()
+    .int()
+    .optional()
+    .describe("Saved bookmark ID."),
+  customFieldValues: z
+    .array(z.unknown())
+    .optional()
+    .describe("Custom field values."),
+};
+
+// ---------------------------------------------------------------------------
+// Activities — create
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "create_event",
+  {
+    title: "Create a D4H event (MUTATES)",
+    description:
+      "Create a routine event (meeting, fundraiser, community engagement) via POST /events. " +
+      "MUTATES data. dry_run defaults to true; review the preview before re-invoking with dry_run: false. " +
+      "Required: startsAt, endsAt, referenceDescription.",
+    inputSchema: { ...activityCreateShape, ...dryRunShape },
+  },
+  async ({ dry_run, ...args }): Promise<ToolResult> => {
+    try {
+      const v = validateActivityMinimums(args, {
+        kind: "event",
+        requireEndsAt: true,
+      });
+      if (!v.ok) return needsMoreInfo("create_event", v.missing, v.invalid);
+
+      const tm = requireTeamManager();
+      const teamId = requireTeamId();
+      const body = stripUndefined(args) as ActivityCreateBody;
+      const path = `/team/${teamId}/events`;
+
+      if (dry_run !== false) return previewRequest("create_event", "POST", path, body);
+
+      const result = await tm.createEvent(body);
+      return okJson(result);
+    } catch (err) {
+      return handleError("create_event", err);
+    }
+  }
+);
+
+server.registerTool(
+  "create_exercise",
+  {
+    title: "Create a D4H training exercise (MUTATES)",
+    description:
+      "Create a training exercise via POST /exercises. MUTATES data. dry_run defaults to true; " +
+      "review the preview before re-invoking with dry_run: false. " +
+      "Required: startsAt, endsAt, referenceDescription.",
+    inputSchema: { ...activityCreateShape, ...dryRunShape },
+  },
+  async ({ dry_run, ...args }): Promise<ToolResult> => {
+    try {
+      const v = validateActivityMinimums(args, {
+        kind: "exercise",
+        requireEndsAt: true,
+      });
+      if (!v.ok) return needsMoreInfo("create_exercise", v.missing, v.invalid);
+
+      const tm = requireTeamManager();
+      const teamId = requireTeamId();
+      const body = stripUndefined(args) as ActivityCreateBody;
+      const path = `/team/${teamId}/exercises`;
+
+      if (dry_run !== false) return previewRequest("create_exercise", "POST", path, body);
+
+      const result = await tm.createExercise(body);
+      return okJson(result);
+    } catch (err) {
+      return handleError("create_exercise", err);
+    }
+  }
+);
+
+server.registerTool(
+  "create_incident",
+  {
+    title: "Create a D4H incident (MUTATES)",
+    description:
+      "Create an incident via POST /incidents. MUTATES data. dry_run defaults to true; " +
+      "review the preview before re-invoking with dry_run: false. " +
+      "Required: startsAt, referenceDescription. " +
+      "endsAt is INTENTIONALLY optional — real callouts are created in-progress and finalized later via update_incident.",
+    inputSchema: { ...activityCreateShape, ...dryRunShape },
+  },
+  async ({ dry_run, ...args }): Promise<ToolResult> => {
+    try {
+      const v = validateActivityMinimums(args, {
+        kind: "incident",
+        requireEndsAt: false,
+      });
+      if (!v.ok) return needsMoreInfo("create_incident", v.missing, v.invalid);
+
+      const tm = requireTeamManager();
+      const teamId = requireTeamId();
+      const body = stripUndefined(args) as ActivityCreateBody;
+      const path = `/team/${teamId}/incidents`;
+
+      if (dry_run !== false) return previewRequest("create_incident", "POST", path, body);
+
+      const result = await tm.createIncident(body);
+      return okJson(result);
+    } catch (err) {
+      return handleError("create_incident", err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Activities — update
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "update_event",
+  {
+    title: "Update a D4H event (MUTATES)",
+    description:
+      "Update an existing event via PATCH /events/{id}. MUTATES data. dry_run defaults to true. " +
+      "Provide the event id plus at least one field to change. If endsAt and startsAt are both provided, endsAt must be >= startsAt.",
+    inputSchema: {
+      id: z
+        .number()
+        .int()
+        .describe("Numeric event ID (the `id` field from get_events)."),
+      ...activityUpdateShape,
+      ...dryRunShape,
+    },
+  },
+  async ({ id, dry_run, ...args }): Promise<ToolResult> => {
+    try {
+      const reject = rejectIfNoUpdateFields(args, "update_event");
+      if (reject) return reject;
+
+      const v = validateActivityMinimums(args, {
+        kind: "event",
+        requireEndsAt: false,
+      });
+      if (!v.ok && v.invalid.length > 0) return needsMoreInfo("update_event", [], v.invalid);
+
+      const tm = requireTeamManager();
+      const teamId = requireTeamId();
+      const body = stripUndefined(args) as ActivityUpdateBody;
+      const path = `/team/${teamId}/events/${id}`;
+
+      if (dry_run !== false) return previewRequest("update_event", "PATCH", path, body);
+
+      const result = await tm.updateEvent(id, body);
+      return okJson(result);
+    } catch (err) {
+      return handleError("update_event", err);
+    }
+  }
+);
+
+server.registerTool(
+  "update_exercise",
+  {
+    title: "Update a D4H exercise (MUTATES)",
+    description:
+      "Update an existing exercise via PATCH /exercises/{id}. MUTATES data. dry_run defaults to true. " +
+      "Provide the exercise id plus at least one field to change.",
+    inputSchema: {
+      id: z
+        .number()
+        .int()
+        .describe("Numeric exercise ID (the `id` field from get_exercises)."),
+      ...activityUpdateShape,
+      ...dryRunShape,
+    },
+  },
+  async ({ id, dry_run, ...args }): Promise<ToolResult> => {
+    try {
+      const reject = rejectIfNoUpdateFields(args, "update_exercise");
+      if (reject) return reject;
+
+      const v = validateActivityMinimums(args, {
+        kind: "exercise",
+        requireEndsAt: false,
+      });
+      if (!v.ok && v.invalid.length > 0) return needsMoreInfo("update_exercise", [], v.invalid);
+
+      const tm = requireTeamManager();
+      const teamId = requireTeamId();
+      const body = stripUndefined(args) as ActivityUpdateBody;
+      const path = `/team/${teamId}/exercises/${id}`;
+
+      if (dry_run !== false) return previewRequest("update_exercise", "PATCH", path, body);
+
+      const result = await tm.updateExercise(id, body);
+      return okJson(result);
+    } catch (err) {
+      return handleError("update_exercise", err);
+    }
+  }
+);
+
+server.registerTool(
+  "update_incident",
+  {
+    title: "Update a D4H incident (MUTATES)",
+    description:
+      "Update an existing incident via PATCH /incidents/{id}. MUTATES data. dry_run defaults to true. " +
+      "Common use: set endsAt on a previously open incident to close it out. Provide the incident id plus at least one field to change.",
+    inputSchema: {
+      id: z
+        .number()
+        .int()
+        .describe("Numeric incident ID (the `id` field from get_incidents)."),
+      ...activityUpdateShape,
+      ...dryRunShape,
+    },
+  },
+  async ({ id, dry_run, ...args }): Promise<ToolResult> => {
+    try {
+      const reject = rejectIfNoUpdateFields(args, "update_incident");
+      if (reject) return reject;
+
+      const v = validateActivityMinimums(args, {
+        kind: "incident",
+        requireEndsAt: false,
+      });
+      if (!v.ok && v.invalid.length > 0) return needsMoreInfo("update_incident", [], v.invalid);
+
+      const tm = requireTeamManager();
+      const teamId = requireTeamId();
+      const body = stripUndefined(args) as ActivityUpdateBody;
+      const path = `/team/${teamId}/incidents/${id}`;
+
+      if (dry_run !== false) return previewRequest("update_incident", "PATCH", path, body);
+
+      const result = await tm.updateIncident(id, body);
+      return okJson(result);
+    } catch (err) {
+      return handleError("update_incident", err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Equipment — create / update
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "create_equipment",
+  {
+    title: "Create a D4H equipment item (MUTATES)",
+    description:
+      "Create a new equipment item via POST /equipment. MUTATES data. dry_run defaults to true. " +
+      "Required: categoryId, kindId. To assign the item to a member AT CREATION, set " +
+      "`location` to { resourceType: \"Member\", id: <memberId> }. After creation, equipment cannot be " +
+      "re-assigned via API (see assign_equipment_to_member).",
+    inputSchema: {
+      categoryId: z
+        .number()
+        .int()
+        .describe("Numeric equipment category ID. Required."),
+      kindId: z
+        .number()
+        .int()
+        .describe("Numeric equipment kind ID. Required."),
+      ref: z
+        .string()
+        .optional()
+        .describe("Reference code. Auto-generated if omitted."),
+      brandId: z.number().int().optional().describe("Brand ID."),
+      modelId: z.number().int().optional().describe("Model ID."),
+      supplierId: z.number().int().optional().describe("Supplier ID."),
+      supplierRefId: z.number().int().optional().describe("Supplier reference ID."),
+      fundId: z.number().int().optional().describe("Funding source ID."),
+      location: z
+        .object({
+          resourceType: z.enum([
+            "Equipment",
+            "Member",
+            "EquipmentLocation",
+            "Team",
+          ]),
+          id: z.number().int(),
+        })
+        .optional()
+        .describe(
+          "Where this equipment is stored or who holds it. For member assignment at creation, use { resourceType: \"Member\", id: <memberId> }."
+        ),
+      quantity: z.number().int().optional().describe("Quantity."),
+      notes: z.string().optional().describe("Free-text notes."),
+      barcode: z.string().optional().describe("Barcode."),
+      serial: z.string().optional().describe("Serial number."),
+      replacementCost: z.number().optional().describe("Replacement cost."),
+      weight: z.number().optional().describe("Weight."),
+      dateManufactured: z
+        .string()
+        .optional()
+        .describe("ISO 8601 date when manufactured."),
+      datePurchased: z
+        .string()
+        .optional()
+        .describe("ISO 8601 date when purchased."),
+      dateWarranty: z
+        .string()
+        .optional()
+        .describe("ISO 8601 warranty expiry date."),
+      dateExpires: z
+        .string()
+        .optional()
+        .describe("ISO 8601 item expiry date."),
+      idMarks: z.string().optional().describe("Identifying marks."),
+      isCritical: z
+        .boolean()
+        .optional()
+        .describe("Flag as critical equipment."),
+      isMonitor: z
+        .boolean()
+        .optional()
+        .describe("Flag as monitored equipment."),
+      ...dryRunShape,
+    },
+  },
+  async ({ dry_run, ...args }): Promise<ToolResult> => {
+    try {
+      const tm = requireTeamManager();
+      const teamId = requireTeamId();
+      const body = stripUndefined(args) as EquipmentCreateBody;
+      const path = `/team/${teamId}/equipment`;
+
+      if (dry_run !== false) return previewRequest("create_equipment", "POST", path, body);
+
+      const result = await tm.createEquipment(body);
+      return okJson(result);
+    } catch (err) {
+      return handleError("create_equipment", err);
+    }
+  }
+);
+
+server.registerTool(
+  "update_equipment",
+  {
+    title: "Update a D4H equipment item (MUTATES)",
+    description:
+      "Update an equipment item via PATCH /equipment/{id}. MUTATES data. dry_run defaults to true. " +
+      "Only allowed fields: status, isCritical, isMonitor, barcode, updateNotes, customFieldValues. " +
+      "NOTE: `RETIRED` is INTENTIONALLY excluded from the status enum — equipment cannot be retired via API; use the D4H web interface. " +
+      "Likewise, member assignment cannot be changed via this endpoint (see assign_equipment_to_member).",
+    inputSchema: {
+      id: z
+        .number()
+        .int()
+        .describe("Numeric equipment ID (the `id` field from get_equipment)."),
+      status: z
+        .enum(["OPERATIONAL", "UNSERVICEABLE", "LOST", "WISHLIST", "INACTIVE"])
+        .optional()
+        .describe(
+          "New operational status. RETIRED is NOT supported — use the D4H web interface to retire items."
+        ),
+      isCritical: z
+        .boolean()
+        .optional()
+        .describe("Flag as critical equipment."),
+      isMonitor: z
+        .boolean()
+        .optional()
+        .describe("Flag as monitored equipment."),
+      barcode: z
+        .string()
+        .nullable()
+        .optional()
+        .describe("New barcode value (null to clear)."),
+      updateNotes: z
+        .string()
+        .optional()
+        .describe("Notes about this change for the audit log."),
+      customFieldValues: z
+        .array(z.unknown())
+        .optional()
+        .describe("Custom field values to set."),
+      ...dryRunShape,
+    },
+  },
+  async ({ id, dry_run, ...args }): Promise<ToolResult> => {
+    try {
+      const reject = rejectIfNoUpdateFields(args, "update_equipment");
+      if (reject) return reject;
+
+      const tm = requireTeamManager();
+      const teamId = requireTeamId();
+      const body = stripUndefined(args) as EquipmentUpdateBody;
+      const path = `/team/${teamId}/equipment/${id}`;
+
+      if (dry_run !== false) return previewRequest("update_equipment", "PATCH", path, body);
+
+      const result = await tm.updateEquipment(id, body);
+      return okJson(result);
+    } catch (err) {
+      return handleError("update_equipment", err);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Equipment ↔ member assignment — UNAVAILABLE in API v3 (registered as stubs)
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "assign_equipment_to_member",
+  {
+    title: "Assign equipment to a member (UNAVAILABLE)",
+    description:
+      "Assign an existing equipment item to a member. REGISTERED AS UNAVAILABLE because the D4H Team Manager v3 API does not expose this operation: PATCH /equipment/{id} rejects every variant of location/member/assignedTo with HTTP 400 (verified via live probe). To assign equipment to a member after creation, use the D4H web interface. To assign AT CREATION, use create_equipment with `location: { resourceType: \"Member\", id }`.",
+    inputSchema: {
+      equipment_id: z
+        .number()
+        .int()
+        .describe("Numeric equipment ID."),
+      member_id: z
+        .number()
+        .int()
+        .describe("Numeric member ID to assign the equipment to."),
+      ...dryRunShape,
+    },
+  },
+  async (): Promise<ToolResult> => {
+    return unavailable(
+      "assign_equipment_to_member",
+      "not supported by the D4H Team Manager v3 API. PATCH /equipment/{id} does not accept location, member, memberId, or assignedTo fields (verified by live probe — all return HTTP 400). To re-assign equipment to a member after creation, use the D4H web interface."
+    );
+  }
+);
+
+server.registerTool(
+  "unassign_equipment_from_member",
+  {
+    title: "Unassign equipment from a member (UNAVAILABLE)",
+    description:
+      "Clear a member assignment on an existing equipment item. REGISTERED AS UNAVAILABLE for the same reason as assign_equipment_to_member: PATCH /equipment/{id} does not accept location-mutating fields. To unassign equipment from a member, use the D4H web interface.",
+    inputSchema: {
+      equipment_id: z
+        .number()
+        .int()
+        .describe("Numeric equipment ID."),
+      ...dryRunShape,
+    },
+  },
+  async (): Promise<ToolResult> => {
+    return unavailable(
+      "unassign_equipment_from_member",
+      "not supported by the D4H Team Manager v3 API. PATCH /equipment/{id} does not accept location-mutating fields. To unassign equipment, use the D4H web interface."
+    );
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Member qualifications — create (add award) + unavailable update stub
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "add_member_qualification",
+  {
+    title: "Award a qualification to a member (MUTATES)",
+    description:
+      "Create a new qualification award via POST /member-qualification-awards. MUTATES data. dry_run defaults to true. " +
+      "Required: memberId (numeric OR the literal string \"me\"), qualificationId, startsAt. endsAt is optional (null = no expiry).",
+    inputSchema: {
+      memberId: z
+        .union([z.number().int(), z.literal("me")])
+        .describe(
+          "Member ID receiving the award. Use a numeric ID or the literal string \"me\" for the caller's own user."
+        ),
+      qualificationId: z
+        .number()
+        .int()
+        .describe(
+          "Numeric ID of the qualification definition (from get_qualifications)."
+        ),
+      startsAt: z
+        .string()
+        .describe("ISO 8601 datetime when the award starts/was issued."),
+      endsAt: z
+        .string()
+        .nullable()
+        .optional()
+        .describe(
+          "ISO 8601 expiry datetime, or null for no expiration. Optional."
+        ),
+      ...dryRunShape,
+    },
+  },
+  async ({ dry_run, ...args }): Promise<ToolResult> => {
+    try {
+      const invalid: InvalidField[] = [];
+      if (!isIsoDateTime(args.startsAt)) {
+        invalid.push({
+          field: "startsAt",
+          reason: `not a valid ISO 8601 datetime (got ${JSON.stringify(args.startsAt)})`,
+        });
+      }
+      if (args.endsAt && !isIsoDateTime(args.endsAt)) {
+        invalid.push({
+          field: "endsAt",
+          reason: `not a valid ISO 8601 datetime (got ${JSON.stringify(args.endsAt)})`,
+        });
+      }
+      if (
+        args.startsAt &&
+        args.endsAt &&
+        isIsoDateTime(args.startsAt) &&
+        isIsoDateTime(args.endsAt) &&
+        new Date(args.endsAt) < new Date(args.startsAt)
+      ) {
+        invalid.push({
+          field: "endsAt",
+          reason: `endsAt (${args.endsAt}) is earlier than startsAt (${args.startsAt}).`,
+        });
+      }
+      if (invalid.length > 0) return needsMoreInfo("add_member_qualification", [], invalid);
+
+      const tm = requireTeamManager();
+      const teamId = requireTeamId();
+      const body = stripUndefined(args) as MemberQualificationAwardCreateBody;
+      const path = `/team/${teamId}/member-qualification-awards`;
+
+      if (dry_run !== false) return previewRequest("add_member_qualification", "POST", path, body);
+
+      const result = await tm.addMemberQualificationAward(body);
+      return okJson(result);
+    } catch (err) {
+      return handleError("add_member_qualification", err);
+    }
+  }
+);
+
+server.registerTool(
+  "update_member_qualification",
+  {
+    title: "Update a qualification award (UNAVAILABLE)",
+    description:
+      "Edit an existing qualification award. REGISTERED AS UNAVAILABLE because the D4H Team Manager v3 API does not expose a PATCH or PUT verb on /member-qualification-awards — only GET and POST exist. To modify an existing award, use the D4H web interface.",
+    inputSchema: {
+      id: z
+        .number()
+        .int()
+        .describe("Numeric award ID (from get_member_qualification_awards)."),
+      startsAt: z.string().optional().describe("New start ISO 8601 datetime."),
+      endsAt: z
+        .string()
+        .nullable()
+        .optional()
+        .describe("New end ISO 8601 datetime, or null for no expiry."),
+      ...dryRunShape,
+    },
+  },
+  async (): Promise<ToolResult> => {
+    return unavailable(
+      "update_member_qualification",
+      "not supported by the D4H Team Manager v3 API (no PATCH/PUT verb is exposed on /member-qualification-awards). Awards cannot be edited via API in the current spec. To modify an existing award, do it in the D4H web interface."
+    );
   }
 );
 

@@ -22,7 +22,7 @@ import axios, { AxiosInstance, AxiosError } from "axios";
 
 export type D4HRegion = "US" | "EU" | "CA";
 
-const REGION_HOSTS: Record<D4HRegion, string> = {
+export const REGION_HOSTS: Record<D4HRegion, string> = {
   US: "api.team-manager.us.d4h.com",
   EU: "api.team-manager.eu.d4h.com",
   CA: "api.team-manager.ca.d4h.com",
@@ -267,6 +267,120 @@ export interface TeamManagerSearchResult {
   owner?: { id: number; resourceType: string };
   resourceType?: string;
   [key: string]: unknown;
+}
+
+// ---------------------------------------------------------------------------
+// Write/edit body shapes (POST/PATCH bodies)
+// ---------------------------------------------------------------------------
+
+/**
+ * Reference to a resource that can contain equipment. Used by
+ * `EquipmentCreateBody.location` at creation time.
+ *
+ * NOTE: PATCH /equipment/{id} does NOT accept `location` — assignment can
+ * only be set at creation. Probed live; D4H rejects `location` on PATCH
+ * with HTTP 400 `Unrecognized key(s) in object: 'location'`.
+ */
+export interface EquipmentLocationRef {
+  resourceType: "Equipment" | "Member" | "EquipmentLocation" | "Team";
+  id: number;
+}
+
+export interface EquipmentCreateBody {
+  categoryId: number;
+  kindId: number;
+  ref?: string;
+  brandId?: number;
+  modelId?: number;
+  supplierId?: number;
+  supplierRefId?: number;
+  fundId?: number;
+  location?: EquipmentLocationRef;
+  quantity?: number;
+  notes?: string;
+  barcode?: string;
+  serial?: string;
+  replacementCost?: number;
+  weight?: number;
+  dateManufactured?: string;
+  datePurchased?: string;
+  dateWarranty?: string;
+  dateExpires?: string;
+  idMarks?: string;
+  isCritical?: boolean;
+  isMonitor?: boolean;
+  expireWarningDays?: number;
+  expireWarningUseCount?: number;
+  expireWarningUseMinutes?: number;
+  expireWarningUseOdometer?: number;
+  costPerHour?: number;
+  costPerUse?: number;
+  costPerDistance?: number;
+  odometerReading?: number;
+  odometerReadingTotal?: number;
+  odometerReadingTotalAllowed?: number;
+  usesAllowed?: number;
+  minutesAllowed?: number;
+}
+
+/**
+ * PATCH /equipment/{id} body. Per the spec, the status enum here drops
+ * "RETIRED" — equipment cannot be retired via API (it's a separate workflow
+ * with a reason). To retire an item, use the D4H web interface.
+ */
+export interface EquipmentUpdateBody {
+  status?: "OPERATIONAL" | "UNSERVICEABLE" | "LOST" | "WISHLIST" | "INACTIVE";
+  isCritical?: boolean;
+  isMonitor?: boolean;
+  barcode?: string | null;
+  updateNotes?: string;
+  customFieldValues?: unknown[];
+}
+
+/** Shared body shape for POST /events, /exercises, /incidents. */
+export interface ActivityCreateBody {
+  startsAt: string;
+  endsAt?: string;
+  reference?: string;
+  referenceDescription?: string;
+  description?: string | null;
+  plan?: string | null;
+  trackingNumber?: string | null;
+  shared?: boolean;
+  fullTeam?: boolean;
+  address?: unknown;
+  location?: unknown;
+  locationBookmarkId?: number;
+  customFieldValues?: unknown[];
+}
+
+/** Shared body shape for PATCH /events/{id}, /exercises/{id}, /incidents/{id}. */
+export interface ActivityUpdateBody {
+  startsAt?: string;
+  endsAt?: string;
+  reference?: string;
+  referenceDescription?: string;
+  description?: string | null;
+  plan?: string | null;
+  trackingNumber?: string | null;
+  shared?: boolean;
+  fullTeam?: boolean;
+  address?: unknown;
+  location?: unknown;
+  locationBookmarkId?: number;
+  customFieldValues?: unknown[];
+}
+
+/**
+ * POST /member-qualification-awards body. The `memberId` field is a union —
+ * either a numeric member id or the literal string `"me"` for the caller's
+ * own user (per the spec).
+ */
+export interface MemberQualificationAwardCreateBody {
+  memberId: number | "me";
+  qualificationId: number;
+  startsAt: string;
+  endsAt?: string | null;
 }
 
 export class TeamManagerClient {
@@ -538,6 +652,152 @@ export class TeamManagerClient {
       const { data } = await this.http.get<
         TeamManagerPage<TeamManagerSearchResult>
       >(endpoint, { params });
+      return data;
+    } catch (err) {
+      throw wrapAxiosError(err, endpoint);
+    }
+  }
+
+  /** POST /v3/team/{teamId}/equipment */
+  async createEquipment(
+    body: EquipmentCreateBody
+  ): Promise<TeamManagerEquipment> {
+    const endpoint = `/team/${this.teamId}/equipment`;
+    try {
+      const { data } = await this.http.post<TeamManagerEquipment>(
+        endpoint,
+        body
+      );
+      return data;
+    } catch (err) {
+      throw wrapAxiosError(err, endpoint);
+    }
+  }
+
+  /** PATCH /v3/team/{teamId}/equipment/{id} */
+  async updateEquipment(
+    id: number,
+    body: EquipmentUpdateBody
+  ): Promise<TeamManagerEquipment> {
+    const endpoint = `/team/${this.teamId}/equipment/${id}`;
+    try {
+      const { data } = await this.http.patch<TeamManagerEquipment>(
+        endpoint,
+        body
+      );
+      return data;
+    } catch (err) {
+      throw wrapAxiosError(err, endpoint);
+    }
+  }
+
+  /** POST /v3/team/{teamId}/events */
+  async createEvent(body: ActivityCreateBody): Promise<TeamManagerActivity> {
+    const endpoint = `/team/${this.teamId}/events`;
+    try {
+      const { data } = await this.http.post<TeamManagerActivity>(
+        endpoint,
+        body
+      );
+      return data;
+    } catch (err) {
+      throw wrapAxiosError(err, endpoint);
+    }
+  }
+
+  /** PATCH /v3/team/{teamId}/events/{id} */
+  async updateEvent(
+    id: number,
+    body: ActivityUpdateBody
+  ): Promise<TeamManagerActivity> {
+    const endpoint = `/team/${this.teamId}/events/${id}`;
+    try {
+      const { data } = await this.http.patch<TeamManagerActivity>(
+        endpoint,
+        body
+      );
+      return data;
+    } catch (err) {
+      throw wrapAxiosError(err, endpoint);
+    }
+  }
+
+  /** POST /v3/team/{teamId}/exercises */
+  async createExercise(
+    body: ActivityCreateBody
+  ): Promise<TeamManagerActivity> {
+    const endpoint = `/team/${this.teamId}/exercises`;
+    try {
+      const { data } = await this.http.post<TeamManagerActivity>(
+        endpoint,
+        body
+      );
+      return data;
+    } catch (err) {
+      throw wrapAxiosError(err, endpoint);
+    }
+  }
+
+  /** PATCH /v3/team/{teamId}/exercises/{id} */
+  async updateExercise(
+    id: number,
+    body: ActivityUpdateBody
+  ): Promise<TeamManagerActivity> {
+    const endpoint = `/team/${this.teamId}/exercises/${id}`;
+    try {
+      const { data } = await this.http.patch<TeamManagerActivity>(
+        endpoint,
+        body
+      );
+      return data;
+    } catch (err) {
+      throw wrapAxiosError(err, endpoint);
+    }
+  }
+
+  /** POST /v3/team/{teamId}/incidents */
+  async createIncident(
+    body: ActivityCreateBody
+  ): Promise<TeamManagerActivity> {
+    const endpoint = `/team/${this.teamId}/incidents`;
+    try {
+      const { data } = await this.http.post<TeamManagerActivity>(
+        endpoint,
+        body
+      );
+      return data;
+    } catch (err) {
+      throw wrapAxiosError(err, endpoint);
+    }
+  }
+
+  /** PATCH /v3/team/{teamId}/incidents/{id} */
+  async updateIncident(
+    id: number,
+    body: ActivityUpdateBody
+  ): Promise<TeamManagerActivity> {
+    const endpoint = `/team/${this.teamId}/incidents/${id}`;
+    try {
+      const { data } = await this.http.patch<TeamManagerActivity>(
+        endpoint,
+        body
+      );
+      return data;
+    } catch (err) {
+      throw wrapAxiosError(err, endpoint);
+    }
+  }
+
+  /** POST /v3/team/{teamId}/member-qualification-awards */
+  async addMemberQualificationAward(
+    body: MemberQualificationAwardCreateBody
+  ): Promise<TeamManagerMemberQualificationAward> {
+    const endpoint = `/team/${this.teamId}/member-qualification-awards`;
+    try {
+      const { data } = await this.http.post<TeamManagerMemberQualificationAward>(
+        endpoint,
+        body
+      );
       return data;
     } catch (err) {
       throw wrapAxiosError(err, endpoint);

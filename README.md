@@ -28,8 +28,9 @@
 
 ## Tools
 
-**13 tools** across personnel, qualifications, activities, attendance, groups,
-tasks, equipment, and global search.
+**25 tools** total — **13 read**, **9 mutating** (default `dry_run: true`), and **3 stubs registered as unavailable** (registered for LLM discoverability; return a structured "unavailable" response pointing at the D4H web interface).
+
+### Read tools (13)
 
 | Tool                              | What it does                                                                  |
 |-----------------------------------|-------------------------------------------------------------------------------|
@@ -47,16 +48,31 @@ tasks, equipment, and global search.
 | `get_equipment`                   | Search equipment inventory by status, location, owner, kind, ref, etc.        |
 | `search_team`                     | Heterogeneous global search across all resource types.                        |
 
-All tools return structured JSON. Errors come back as MCP error results with a
-descriptive message — the server itself never crashes on a failed API call.
+### Mutating tools (9) — all default `dry_run: true`
 
-> **⚠️ v0.2.0 breaking change**: the previous `get_member_efficiency` tool was
-> renamed to `get_qualifications` (and its description corrected — the
-> endpoint returns the qualification catalog, not per-member awards). For
-> per-member readiness data, use the new `get_member_qualification_awards`.
+| Tool                          | What it does                                                                       |
+|-------------------------------|------------------------------------------------------------------------------------|
+| `create_event`                | Create a routine event. Requires `startsAt`, `endsAt`, `referenceDescription`.    |
+| `create_exercise`             | Create a training exercise. Same required floor as `create_event`.                 |
+| `create_incident`             | Create an incident. Requires `startsAt`, `referenceDescription`. `endsAt` optional. |
+| `update_event`                | Update an existing event. ≥1 field required.                                       |
+| `update_exercise`             | Update an existing exercise. ≥1 field required.                                    |
+| `update_incident`             | Update an existing incident. Most common use: set `endsAt` to close it out.        |
+| `create_equipment`            | Create a new equipment item. To assign to a member at creation, use `location: { resourceType: "Member", id }`. |
+| `update_equipment`            | Update equipment status/notes/flags. `RETIRED` status NOT supported via API.      |
+| `add_member_qualification`    | Award a qualification to a member. Supports `memberId: "me"` for the caller.      |
 
-See **[docs/tools.md](./docs/tools.md)** for full input schemas, examples, and
-output shapes.
+### Stubs registered as unavailable (3)
+
+| Tool                              | Why unavailable                                                                                                              |
+|-----------------------------------|------------------------------------------------------------------------------------------------------------------------------|
+| `assign_equipment_to_member`      | PATCH `/equipment/{id}` rejects every variant of `location`/`member`/`assignedTo` (HTTP 400, live-probed). Use the web UI.   |
+| `unassign_equipment_from_member`  | Same constraint as `assign_equipment_to_member`. Use the web UI.                                                            |
+| `update_member_qualification`     | `/member-qualification-awards` has no PATCH/PUT verb. Awards are immutable via API. Use the web UI.                         |
+
+> **dry_run pattern**: every mutating tool defaults to `dry_run: true`. The tool validates inputs and returns a structured preview of the HTTP request that *would* be sent — without sending it. Set `dry_run: false` to actually send. Missing required fields return a `needsMoreInfo` response phrased as a question (the LLM naturally relays it to the user instead of fabricating values).
+
+All tools return structured JSON. Errors come back as MCP results with `isError: true` and a descriptive message — the server itself never crashes on a failed API call. See **[docs/tools.md](./docs/tools.md)** for full input schemas, examples, dry-run previews, `needsMoreInfo` shape, and per-tool round-trip recipes.
 
 ---
 
