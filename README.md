@@ -1,5 +1,8 @@
 # mcp-d4h
 
+[![npm version](https://img.shields.io/npm/v/@gfnord/mcp-d4h?logo=npm&label=npm)](https://www.npmjs.com/package/@gfnord/mcp-d4h)
+[![GitHub Packages](https://img.shields.io/github/v/release/gfnord/mcp-d4h?logo=github&label=GitHub%20Packages)](https://github.com/gfnord/mcp-d4h/packages)
+[![Publish](https://github.com/gfnord/mcp-d4h/actions/workflows/publish.yml/badge.svg)](https://github.com/gfnord/mcp-d4h/actions/workflows/publish.yml)
 [![Node](https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/typescript-strict-3178C6?logo=typescript&logoColor=white)](./tsconfig.json)
 [![MCP](https://img.shields.io/badge/MCP-stdio-blueviolet)](https://modelcontextprotocol.io)
