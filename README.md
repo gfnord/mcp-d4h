@@ -28,7 +28,7 @@
 
 ## Tools
 
-**25 tools** total — **13 read**, **9 mutating** (default `dry_run: true`), and **3 stubs registered as unavailable** (registered for LLM discoverability; return a structured "unavailable" response pointing at the D4H web interface).
+**26 tools** total — **13 read**, **10 mutating** (default `dry_run: true`), and **3 stubs registered as unavailable** (registered for LLM discoverability; return a structured "unavailable" response pointing at the D4H web interface).
 
 ### Read tools (13)
 
@@ -48,7 +48,7 @@
 | `get_equipment`                   | Search equipment inventory by status, location, owner, kind, ref, etc.        |
 | `search_team`                     | Heterogeneous global search across all resource types.                        |
 
-### Mutating tools (9) — all default `dry_run: true`
+### Mutating tools (10) — all default `dry_run: true`
 
 | Tool                          | What it does                                                                       |
 |-------------------------------|------------------------------------------------------------------------------------|
@@ -61,6 +61,7 @@
 | `create_equipment`            | Create a new equipment item. To assign to a member at creation, use `location: { resourceType: "Member", id }`. |
 | `update_equipment`            | Update equipment status/notes/flags. `RETIRED` status NOT supported via API.      |
 | `add_member_qualification`    | Award a qualification to a member. Supports `memberId: "me"` for the caller.      |
+| `manage_attendance`           | Add / update / remove attendance (POST / PATCH / DELETE). Only DELETE in server — attendance is an edge, not an entity. |
 
 ### Stubs registered as unavailable (3)
 

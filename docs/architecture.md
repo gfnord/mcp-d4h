@@ -20,7 +20,7 @@ flowchart LR
       Boot["Bootstrap<br/>src/index.ts (top)"]
       Server["McpServer<br/>(@modelcontextprotocol/sdk)"]
       ReadTools["13 Read Tools<br/>get_*, search_team"]
-      MutTools["9 Mutating Tools<br/>create_*, update_*, add_member_qualification<br/>(default dry_run: true)"]
+      MutTools["10 Mutating Tools<br/>create_*, update_*, add_member_qualification,<br/>manage_attendance (POST/PATCH/DELETE)<br/>(default dry_run: true)"]
       Stubs["3 Unavailable Stubs<br/>assign/unassign_equipment_to_member,<br/>update_member_qualification"]
       Client["Team Manager Client<br/>src/d4h.ts"]
       ErrModel["D4HApiError<br/>+ handleError<br/>+ needsMoreInfo / unavailable / dryRun"]
@@ -69,7 +69,7 @@ Responsibilities:
    [mcp-d4h] Region=US TeamManager=configured
    ```
 
-4. Construct the `McpServer`, register the 25 tools (13 read + 9 mutating
+4. Construct the `McpServer`, register the 26 tools (13 read + 10 mutating
    + 3 unavailable stubs), connect a `StdioServerTransport`.
 
 ### 2.2 Team Manager Client — [`src/d4h.ts`](../src/d4h.ts)
@@ -98,7 +98,8 @@ registration shape but with different middleware:
 2. Calls `requireTeamManager()` → throws if client not configured.
 3. Returns `okJson(data)` on success or `handleError(name, err)` on failure.
 
-**Mutating tools** (9) — `create_*`, `update_*`, `add_member_qualification`:
+**Mutating tools** (10) — `create_*`, `update_*`, `add_member_qualification`,
+`manage_attendance`:
 
 1. Schema includes the shared `dryRunShape` (`dry_run: boolean`, default `true`).
 2. Runs domain validation via `validateActivityMinimums` (activity creates)
@@ -302,8 +303,12 @@ These are deliberate omissions, not oversights:
 - **No multiplexing across teams.** One server process = one team. If you
   need multi-team routing, run multiple `mcp-d4h` instances under different
   host entries (`d4h-team-a`, `d4h-team-b`, …).
-- **No write tools.** All current endpoints are read-only. If you add
-  mutating tools (e.g. attendance updates), gate them behind an explicit
-  opt-in env flag and document the audit-log implications clearly.
+- **No delete of tracked entities.** The server never issues DELETE for
+  incidents, events, exercises, members, equipment, or qualifications — these
+  are tracked records with audit implications. The sole exception is
+  `manage_attendance` with `action: "remove"`, which DELETEs an attendance
+  record. Attendance is an **edge** (a join between a member and an
+  activity), not an entity; removing it edits the activity's roster without
+  deleting the member or the activity. This is the only DELETE in the server.
 - **No streaming results.** All tool results are returned as a single JSON
   payload. The MCP `text` content model fits that naturally.

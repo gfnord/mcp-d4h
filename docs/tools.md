@@ -3,10 +3,10 @@
 Every tool exposed by `mcp-d4h` is documented here with its **input schema**,
 **output shape**, an **example call**, and the **D4H endpoint** it hits.
 
-Tools registered: **25** (all D4H Team Manager API, spec v7.0.1, URL prefix `/v3`).
+Tools registered: **26** (all D4H Team Manager API, spec v7.0.1, URL prefix `/v3`).
 
 - **13 read** tools (`get_*`, `search_team`)
-- **9 mutating** tools (`create_*`, `update_*`, `add_member_qualification`) — all default `dry_run: true`
+- **10 mutating** tools (`create_*`, `update_*`, `add_member_qualification`, `manage_attendance`) — all default `dry_run: true`
 - **3 unavailable stubs** (`update_member_qualification`, `assign_equipment_to_member`, `unassign_equipment_from_member`) — registered for discoverability; return a structured "unavailable" response pointing at the D4H web interface
 
 | Tool                                | Kind | Section |
@@ -35,6 +35,7 @@ Tools registered: **25** (all D4H Team Manager API, spec v7.0.1, URL prefix `/v3
 | `assign_equipment_to_member`        | ⛔ unavailable | [↓](#assign_equipment_to_member) |
 | `unassign_equipment_from_member`    | ⛔ unavailable | [↓](#unassign_equipment_from_member) |
 | `add_member_qualification`          | mutate | [↓](#add_member_qualification) |
+| `manage_attendance`                 | mutate | [↓](#manage_attendance) |
 | `update_member_qualification`       | ⛔ unavailable | [↓](#update_member_qualification) |
 
 ---
@@ -52,7 +53,7 @@ Tools registered: **25** (all D4H Team Manager API, spec v7.0.1, URL prefix `/v3
 - **Detail endpoints** (`get_member`, `get_incident`) take a numeric `id` as
   the only required argument.
 
-### Mutating tools (create_*, update_*, add_member_qualification)
+### Mutating tools (create_*, update_*, add_member_qualification, manage_attendance)
 
 - Every mutating tool accepts a **`dry_run` boolean parameter, defaulting to `true`**.
   - `dry_run: true` (or omitted) → the tool validates inputs and returns a **structured preview** of the HTTP request that *would* be sent. No request is sent.
@@ -632,8 +633,8 @@ Create a new routine event (meeting, fundraiser, community engagement). Required
 | `trackingNumber` | string \| null | no | External tracking number. |
 | `shared` | boolean | no | Share across organisation. |
 | `fullTeam` | boolean | no | Requires full team attendance. |
-| `address` | object | no | Physical address object. |
-| `location` | object | no | Geographic location (lat/lon geometry). |
+| `address` | `{ street?, town?, region?, postcode?, country? }` | no | Postal address. Use `town` for city and `region` for province/state. |
+| `location` | `{ latitude, longitude }` | no | Geographic coordinates as flat lat/lon (NOT GeoJSON). D4H returns GeoJSON on read but the API requires flat lat/lon on write. |
 | `locationBookmarkId` | integer | no | Saved bookmark ID. |
 | `customFieldValues` | array | no | Array of `{customFieldId, value}` objects. |
 | `dry_run` | boolean | no | Default `true`. Set `false` to actually send. |
@@ -1189,6 +1190,147 @@ The `/member-qualification-awards` resource exposes only `GET` (list) and `POST`
     "mcp-d4h/unavailable": true,
     "mcp-d4h/tool": "update_member_qualification",
     "mcp-d4h/specVersion": "7.0.1"
+  }
+}
+```
+
+---
+
+## `manage_attendance`
+
+> **Method:** `POST` / `PATCH` / `DELETE` · **Path:** `/v3/team/{D4H_TEAM_ID}/attendance` · ⚠️ **MUTATES** · `dry_run` defaults to `true`
+
+Add, update, or remove attendance records. The `action` field selects the operation:
+
+| Action | Verb | Required fields | Optional fields |
+|--------|------|-----------------|-----------------|
+| `add` | POST | `memberId`, `activityId`, `startsAt`, `endsAt` | `status` (default `ATTENDING`), `roleId` |
+| `update` | PATCH | `id` | `status`, `roleId`, `startsAt`, `endsAt` (≥1 required) |
+| `remove` | DELETE | `id` | — |
+
+> **DELETE policy:** The `remove` action is the **only DELETE** this server performs. Attendance is an edge record (a join between a member and an activity), not a tracked entity. Removing it edits the activity's roster — it does not delete the member or the activity. See [docs/architecture.md §5](./architecture.md#5-security-model) for the edge-vs-entity rule.
+
+### Input
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `action` | `"add"` \| `"update"` \| `"remove"` | **yes** | Which operation to perform. |
+| `id` | integer | update, remove | Existing attendance record ID. |
+| `memberId` | integer | add | Member to mark attendance for. |
+| `activityId` | integer | add | Activity (incident/event/exercise) ID. |
+| `status` | `"ABSENT"` \| `"ATTENDING"` \| `"REQUESTED"` | no | Attendance status. Defaults to `ATTENDING` on add. |
+| `startsAt` | ISO 8601 string | add | When attendance starts. |
+| `endsAt` | ISO 8601 string | add | When attendance ends. |
+| `roleId` | integer \| null | no | Role assigned for this attendance. |
+| `dry_run` | boolean | no | Default `true`. |
+
+### Example: add (dry_run preview)
+
+```json
+{
+  "name": "manage_attendance",
+  "arguments": {
+    "action": "add",
+    "memberId": 20816,
+    "activityId": 186332,
+    "startsAt": "2026-06-20T08:00:00Z",
+    "endsAt": "2026-06-20T16:00:00Z",
+    "status": "ATTENDING"
+  }
+}
+```
+
+Preview returned (no API call):
+
+```json
+{
+  "dry_run": true,
+  "request": {
+    "method": "POST",
+    "url": "https://api.team-manager.ca.d4h.com/v3/team/501/attendance",
+    "body": {
+      "memberId": 20816,
+      "activityId": 186332,
+      "startsAt": "2026-06-20T08:00:00Z",
+      "endsAt": "2026-06-20T16:00:00Z",
+      "status": "ATTENDING"
+    }
+  }
+}
+```
+
+### Example: update (dry_run preview)
+
+```json
+{
+  "name": "manage_attendance",
+  "arguments": {
+    "action": "update",
+    "id": 9001,
+    "status": "ABSENT"
+  }
+}
+```
+
+### Example: remove (dry_run preview)
+
+```json
+{
+  "name": "manage_attendance",
+  "arguments": {
+    "action": "remove",
+    "id": 9001
+  }
+}
+```
+
+Preview returned:
+
+```json
+{
+  "dry_run": true,
+  "request": {
+    "method": "DELETE",
+    "url": "https://api.team-manager.ca.d4h.com/v3/team/501/attendance/9001",
+    "body": null
+  }
+}
+```
+
+### Example: missing required fields → needsMoreInfo
+
+```json
+{
+  "name": "manage_attendance",
+  "arguments": { "action": "add", "memberId": 20816 }
+}
+```
+
+Returns:
+
+```text
+Cannot manage attendance yet.
+
+Invalid input:
+  • activityId: required for add
+  • startsAt: required for add
+  • endsAt: required for add
+
+Please correct the invalid fields.
+```
+
+### Example: real round-trip (add)
+
+```json
+{
+  "name": "manage_attendance",
+  "arguments": {
+    "action": "add",
+    "memberId": 20816,
+    "activityId": 186332,
+    "startsAt": "2026-06-20T08:00:00Z",
+    "endsAt": "2026-06-20T16:00:00Z",
+    "dry_run": false
   }
 }
 ```

@@ -1,6 +1,6 @@
 {
   "name": "@gfnord/mcp-d4h",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Model Context Protocol (MCP) server exposing the D4H Team Manager API (spec v7.0.1, URL prefix /v3) to LLM hosts.",
   "type": "module",
   "bin": {

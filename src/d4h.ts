@@ -383,6 +383,28 @@ export interface MemberQualificationAwardCreateBody {
   endsAt?: string | null;
 }
 
+/**
+ * POST /attendance body. Per the spec: memberId, activityId, startsAt, endsAt
+ * are all required; status and roleId are optional. Status enum from spec is
+ * `ABSENT | ATTENDING | REQUESTED` — there is no `STANDBY` value.
+ */
+export interface AttendanceCreateBody {
+  memberId: number;
+  activityId: number;
+  startsAt: string;
+  endsAt: string;
+  status?: "ABSENT" | "ATTENDING" | "REQUESTED";
+  roleId?: number;
+}
+
+/** PATCH /attendance/{id} body — all fields optional. */
+export interface AttendanceUpdateBody {
+  status?: "ABSENT" | "ATTENDING" | "REQUESTED";
+  startsAt?: string;
+  endsAt?: string;
+  roleId?: number | null;
+}
+
 export class TeamManagerClient {
   private readonly http: AxiosInstance;
   private readonly teamId: string | number;
@@ -799,6 +821,57 @@ export class TeamManagerClient {
         body
       );
       return data;
+    } catch (err) {
+      throw wrapAxiosError(err, endpoint);
+    }
+  }
+
+  /** POST /v3/team/{teamId}/attendance */
+  async createAttendance(
+    body: AttendanceCreateBody
+  ): Promise<TeamManagerAttendance> {
+    const endpoint = `/team/${this.teamId}/attendance`;
+    try {
+      const { data } = await this.http.post<TeamManagerAttendance>(
+        endpoint,
+        body
+      );
+      return data;
+    } catch (err) {
+      throw wrapAxiosError(err, endpoint);
+    }
+  }
+
+  /** PATCH /v3/team/{teamId}/attendance/{id} */
+  async updateAttendance(
+    id: number,
+    body: AttendanceUpdateBody
+  ): Promise<TeamManagerAttendance> {
+    const endpoint = `/team/${this.teamId}/attendance/${id}`;
+    try {
+      const { data } = await this.http.patch<TeamManagerAttendance>(
+        endpoint,
+        body
+      );
+      return data;
+    } catch (err) {
+      throw wrapAxiosError(err, endpoint);
+    }
+  }
+
+  /**
+   * DELETE /v3/team/{teamId}/attendance/{id}
+   *
+   * Removes an attendance record. This is the ONLY DELETE this server makes.
+   * Per the documented policy: attendance is an edge record (links a member
+   * to an activity); removing it edits the activity's roster without
+   * deleting either the member or the activity entity. See
+   * docs/architecture.md §5 for the edge-vs-entity rule.
+   */
+  async removeAttendance(id: number): Promise<void> {
+    const endpoint = `/team/${this.teamId}/attendance/${id}`;
+    try {
+      await this.http.delete(endpoint);
     } catch (err) {
       throw wrapAxiosError(err, endpoint);
     }

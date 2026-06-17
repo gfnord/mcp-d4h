@@ -25,6 +25,8 @@ import {
   ActivityCreateBody,
   ActivityUpdateBody,
   MemberQualificationAwardCreateBody,
+  AttendanceCreateBody,
+  AttendanceUpdateBody,
 } from "./d4h.js";
 
 // ---------------------------------------------------------------------------
@@ -49,7 +51,7 @@ console.error(
 
 const server = new McpServer({
   name: "mcp-d4h",
-  version: "0.3.0",
+  version: "0.4.0",
 });
 
 // ---------------------------------------------------------------------------
@@ -636,7 +638,7 @@ function requireTeamId(): string {
 
 function previewRequest(
   toolName: string,
-  method: "POST" | "PATCH",
+  method: "POST" | "PATCH" | "DELETE",
   path: string,
   body: unknown
 ): ToolResult {
@@ -899,13 +901,34 @@ const activityCreateShape = {
     .optional()
     .describe("Whether the activity requires the full team."),
   address: z
-    .record(z.unknown())
+    .object({
+      street: z.string().max(100).optional(),
+      town: z
+        .string()
+        .max(100)
+        .optional()
+        .describe("City or town name. D4H's field is named `town`."),
+      region: z
+        .string()
+        .max(100)
+        .optional()
+        .describe("Province, state, or region. D4H's field is named `region`."),
+      postcode: z.string().max(100).optional(),
+      country: z.string().optional(),
+    })
     .optional()
-    .describe("Physical address object (street, country, postcode, etc.)."),
+    .describe(
+      "Postal address. Use `town` for city and `region` for province/state. All fields optional within the object."
+    ),
   location: z
-    .record(z.unknown())
+    .object({
+      latitude: z.number().min(-90).max(90),
+      longitude: z.number().min(-180).max(180),
+    })
     .optional()
-    .describe("Geographic location object (lat/lon geometry)."),
+    .describe(
+      "Geographic coordinates as flat lat/lon (NOT GeoJSON — D4H returns GeoJSON on read but the v3 API spec requires flat lat/lon on write)."
+    ),
   locationBookmarkId: z
     .number()
     .int()
@@ -939,8 +962,27 @@ const activityUpdateShape = {
     .describe("External tracking number."),
   shared: z.boolean().optional().describe("Shared across organisation."),
   fullTeam: z.boolean().optional().describe("Requires full team."),
-  address: z.record(z.unknown()).optional().describe("Physical address."),
-  location: z.record(z.unknown()).optional().describe("Geographic location."),
+  address: z
+    .object({
+      street: z.string().max(100).optional(),
+      town: z.string().max(100).optional().describe("City or town."),
+      region: z.string().max(100).optional().describe("Province/state/region."),
+      postcode: z.string().max(100).optional(),
+      country: z.string().optional(),
+    })
+    .optional()
+    .describe(
+      "Postal address. Use `town` for city and `region` for province/state."
+    ),
+  location: z
+    .object({
+      latitude: z.number().min(-90).max(90),
+      longitude: z.number().min(-180).max(180),
+    })
+    .optional()
+    .describe(
+      "Geographic coordinates as flat lat/lon (NOT GeoJSON — D4H returns GeoJSON on read but the v3 API spec requires flat lat/lon on write)."
+    ),
   locationBookmarkId: z
     .number()
     .int()
@@ -1503,6 +1545,171 @@ server.registerTool(
       "update_member_qualification",
       "not supported by the D4H Team Manager v3 API (no PATCH/PUT verb is exposed on /member-qualification-awards). Awards cannot be edited via API in the current spec. To modify an existing award, do it in the D4H web interface."
     );
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Attendance — manage (add / update / remove)
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "manage_attendance",
+  {
+    title: "Add, update, or remove attendance (MUTATES)",
+    description:
+      "Manage attendance records via POST/PATCH/DELETE on /attendance. " +
+      "action: \"add\" adds a member to an activity (POST). \"update\" edits an existing attendance record (PATCH). " +
+      "\"remove\" deletes an attendance record (DELETE). " +
+      "dry_run defaults to true. The remove action is the only DELETE in this server — attendance is an edge record " +
+      "(member↔activity), not an entity; removing it edits the activity's roster without deleting the member or activity.",
+    inputSchema: {
+      action: z
+        .enum(["add", "update", "remove"])
+        .describe("Which attendance operation to perform."),
+      id: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "Existing attendance record ID. Required for update and remove."
+        ),
+      memberId: z
+        .number()
+        .int()
+        .optional()
+        .describe("Member ID to mark attendance for. Required for add."),
+      activityId: z
+        .number()
+        .int()
+        .optional()
+        .describe("Activity (incident/event/exercise) ID. Required for add."),
+      status: z
+        .enum(["ABSENT", "ATTENDING", "REQUESTED"])
+        .optional()
+        .describe(
+          'Attendance status. Optional — defaults to "ATTENDING" on add. Allowed: ABSENT, ATTENDING, REQUESTED.'
+        ),
+      startsAt: z
+        .string()
+        .optional()
+        .describe(
+          "ISO 8601 datetime when attendance starts. Required for add; optional for update."
+        ),
+      endsAt: z
+        .string()
+        .optional()
+        .describe(
+          "ISO 8601 datetime when attendance ends. Required for add; optional for update."
+        ),
+      roleId: z
+        .number()
+        .int()
+        .nullable()
+        .optional()
+        .describe("Role ID assigned for this attendance. Optional."),
+      ...dryRunShape,
+    },
+  },
+  async ({ dry_run, ...args }): Promise<ToolResult> => {
+    try {
+      const tm = requireTeamManager();
+      const teamId = requireTeamId();
+      const action = args.action;
+      const invalid: InvalidField[] = [];
+
+      if (action === "add") {
+        if (args.memberId === undefined)
+          invalid.push({ field: "memberId", reason: "required for add" });
+        if (args.activityId === undefined)
+          invalid.push({ field: "activityId", reason: "required for add" });
+        if (!args.startsAt)
+          invalid.push({ field: "startsAt", reason: "required for add" });
+        if (!args.endsAt)
+          invalid.push({ field: "endsAt", reason: "required for add" });
+      } else if (action === "update" || action === "remove") {
+        if (args.id === undefined)
+          invalid.push({ field: "id", reason: `required for ${action}` });
+      }
+
+      if (args.startsAt && !isIsoDateTime(args.startsAt)) {
+        invalid.push({
+          field: "startsAt",
+          reason: `not a valid ISO 8601 datetime (got ${JSON.stringify(args.startsAt)})`,
+        });
+      }
+      if (args.endsAt && !isIsoDateTime(args.endsAt)) {
+        invalid.push({
+          field: "endsAt",
+          reason: `not a valid ISO 8601 datetime (got ${JSON.stringify(args.endsAt)})`,
+        });
+      }
+
+      if (invalid.length > 0)
+        return needsMoreInfo("manage_attendance", [], invalid);
+
+      if (action === "remove") {
+        const path = `/team/${teamId}/attendance/${args.id}`;
+        if (dry_run !== false)
+          return previewRequest("manage_attendance", "DELETE", path, null);
+        await tm.removeAttendance(args.id!);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                deleted: true,
+                id: args.id,
+                note: "Attendance record removed.",
+              }),
+            },
+          ],
+        };
+      }
+
+      if (action === "update") {
+        const updateFields: Record<string, unknown> = {};
+        if (args.status !== undefined) updateFields.status = args.status;
+        if (args.roleId !== undefined) updateFields.roleId = args.roleId;
+        if (args.startsAt !== undefined) updateFields.startsAt = args.startsAt;
+        if (args.endsAt !== undefined) updateFields.endsAt = args.endsAt;
+
+        const rejection = rejectIfNoUpdateFields(
+          updateFields,
+          "manage_attendance"
+        );
+        if (rejection) return rejection;
+
+        const path = `/team/${teamId}/attendance/${args.id}`;
+        const body = stripUndefined(
+          updateFields
+        ) as AttendanceUpdateBody;
+
+        if (dry_run !== false)
+          return previewRequest("manage_attendance", "PATCH", path, body);
+
+        const result = await tm.updateAttendance(args.id!, body);
+        return okJson(result);
+      }
+
+      const body = stripUndefined({
+        memberId: args.memberId,
+        activityId: args.activityId,
+        startsAt: args.startsAt,
+        endsAt: args.endsAt,
+        status: args.status,
+        roleId: args.roleId,
+      }) as AttendanceCreateBody;
+
+      const path = `/team/${teamId}/attendance`;
+
+      if (dry_run !== false)
+        return previewRequest("manage_attendance", "POST", path, body);
+
+      const result = await tm.createAttendance(body);
+      return okJson(result);
+    } catch (err) {
+      return handleError("manage_attendance", err);
+    }
   }
 );
 
