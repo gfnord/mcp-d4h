@@ -180,5 +180,4 @@ You should see, on stdout:
       secrets file — back it up encrypted, don't sync it through unencrypted
       channels.
 - [ ] Rotate the PAT on staff turnover.
-- [ ] If you later add mutating tools, gate them behind an explicit opt-in
-      env flag and document the audit-log implications.
+- [ ] Review the mutating tools (`create_*`, `update_*`, `add_member_qualification`, `manage_attendance`) and confirm the PAT's permissions cover the operations your team needs.

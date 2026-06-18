@@ -10,8 +10,9 @@
 
 > A [Model Context Protocol](https://modelcontextprotocol.io) server that lets
 > LLM hosts (Claude Desktop, etc.) talk to the **D4H Team Manager API**
-> (spec version 7.0.1, URL prefix `/v3`) — read personnel, qualifications,
-> and equipment — through one stdio MCP server.
+> (spec version 7.0.1, URL prefix `/v3`) — read and manage personnel,
+> qualifications, equipment, activities, attendance, groups, tasks, and more —
+> through one stdio MCP server.
 
 ```text
 ┌─────────────────┐  stdio JSON-RPC   ┌──────────────────┐   HTTPS    ┌──────────────────────┐
@@ -180,7 +181,7 @@ Edit the host config:
 }
 ```
 
-Restart Claude Desktop. The three `d4h` tools will appear and become callable
+Restart Claude Desktop. The `d4h` tools will appear and become callable
 by the model.
 
 ---

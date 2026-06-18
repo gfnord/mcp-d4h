@@ -38,7 +38,7 @@ Requirements:
 mcp-d4h/
 ├── src/
 │   ├── d4h.ts         # Typed axios client + D4HApiError + factory
-│   └── index.ts       # MCP server bootstrap + 3 tool registrations
+│   └── index.ts       # MCP server bootstrap + 26 tool registrations
 ├── docs/
 │   ├── architecture.md
 │   ├── configuration.md
@@ -90,39 +90,33 @@ mcp-d4h/
 
 ## 5. Recipe: add a new tool
 
-Worked example — let's add `get_incidents` (list incidents owned by the
-team). The Team Manager API exposes this at
-`GET /v3/team/{teamId}/incidents` (see D4H's
+Worked example — let's add a hypothetical `get_roles` (list roles defined on
+the team). The Team Manager API would expose this at
+`GET /v3/team/{teamId}/member-roles` (see D4H's
 [API Quick Start Guide](https://help.d4h.com/article/374-api-quick-start-guide)).
 
 ### Step 1 — Extend the client
 
-In [`src/d4h.ts`](../src/d4h.ts), add a typed method to `TeamManagerClient`:
+In [`src/d4h.ts`](../src/d4h.ts), add a typed result interface and a method
+to `TeamManagerClient`:
 
 ```ts
-export interface TeamManagerIncident {
+export interface TeamManagerRole {
   id: number;
-  reference?: string;
-  referenceDescription?: string;
-  resourceType?: "Incident" | "Event" | "Exercise";
-  startsAt?: string;
-  endsAt?: string;
-  description?: string;
+  title?: string;
+  resourceType?: string;
   [key: string]: unknown;
 }
 
 // inside class TeamManagerClient { ... }
-async listIncidents(params: {
+async listRoles(params: {
   page?: number;
   size?: number;
-  resource_type?: "Incident" | "Event" | "Exercise";
-  reference?: string;
-  before?: string;
-  after?: string;
-} = {}): Promise<TeamManagerPage<TeamManagerIncident>> {
-  const endpoint = `/team/${this.teamId}/incidents`;
+  title?: string;
+} = {}): Promise<TeamManagerPage<TeamManagerRole>> {
+  const endpoint = `/team/${this.teamId}/member-roles`;
   try {
-    const { data } = await this.http.get<TeamManagerPage<TeamManagerIncident>>(
+    const { data } = await this.http.get<TeamManagerPage<TeamManagerRole>>(
       endpoint,
       { params }
     );
@@ -149,39 +143,26 @@ registrations):
 
 ```ts
 server.registerTool(
-  "get_incidents",
+  "get_roles",
   {
-    title: "List D4H Team Manager incidents",
+    title: "List D4H member roles",
     description:
-      "List incidents, events, and exercises owned by the team. Supports " +
-      "filtering by resource type and a free-text reference search.",
+      "List the team's member role definitions from `/member-roles`.",
     inputSchema: {
       ...paginationShape,
-      resource_type: z
-        .enum(["Incident", "Event", "Exercise"])
-        .optional()
-        .describe("Filter by record type."),
-      reference: z
+      title: z
         .string()
         .optional()
-        .describe("Free-text search across reference number and description."),
-      after: z
-        .string()
-        .optional()
-        .describe("ISO 8601 timestamp; only records starting after this time."),
-      before: z
-        .string()
-        .optional()
-        .describe("ISO 8601 timestamp; only records starting before this time."),
+        .describe("Filter by role title."),
     },
   },
   async (params): Promise<ToolResult> => {
     try {
       const tm = requireTeamManager();
-      const result = await tm.listIncidents(params);
+      const result = await tm.listRoles(params);
       return okJson(result);
     } catch (err) {
-      return handleError("get_incidents", err);
+      return handleError("get_roles", err);
     }
   }
 );
