@@ -19,11 +19,11 @@ flowchart LR
     subgraph mcp-d4h
       Boot["Bootstrap<br/>src/index.ts (top)"]
       Server["McpServer<br/>(@modelcontextprotocol/sdk)"]
-      ReadTools["13 Read Tools<br/>get_*, search_team"]
-      MutTools["10 Mutating Tools<br/>create_*, update_*, add_member_qualification,<br/>manage_attendance (POST/PATCH/DELETE)<br/>(default dry_run: true)"]
+      ReadTools["14 Read Tools<br/>get_*, search_team"]
+      MutTools["11 Mutating Tools<br/>create_*, update_*, add_member_qualification,<br/>manage_attendance (POST/PATCH/DELETE)<br/>(default dry_run: true)"]
       Stubs["3 Unavailable Stubs<br/>assign/unassign_equipment_to_member,<br/>update_member_qualification"]
       Client["Team Manager Client<br/>src/d4h.ts"]
-      ErrModel["D4HApiError<br/>+ handleError<br/>+ needsMoreInfo / unavailable / dryRun"]
+      ErrModel["D4HApiError<br/>+ handleError<br/>+ needsMoreInfo / unavailable / dryRun<br/>+ moduleNotEnabled / costingPermission"]
     end
 
     TM["D4H Team Manager API<br/>api.team-manager.&lt;region&gt;.d4h.com/v3"]
@@ -69,7 +69,7 @@ Responsibilities:
    [mcp-d4h] Region=US TeamManager=configured
    ```
 
-4. Construct the `McpServer`, register the 26 tools (13 read + 10 mutating
+4. Construct the `McpServer`, register the 28 tools (14 read + 11 mutating
    + 3 unavailable stubs), connect a `StdioServerTransport`.
 
 ### 2.2 Team Manager Client — [`src/d4h.ts`](../src/d4h.ts)
@@ -92,13 +92,13 @@ Uses `McpServer.registerTool(name, config, handler)` from the official SDK
 (v1.x). The tool layer has three kinds of handlers, sharing the same
 registration shape but with different middleware:
 
-**Read tools** (13) — `get_*` and `search_team`:
+**Read tools** (14) — `get_*` and `search_team`:
 
 1. Declares a Zod input schema with `.describe()` on every field.
 2. Calls `requireTeamManager()` → throws if client not configured.
 3. Returns `okJson(data)` on success or `handleError(name, err)` on failure.
 
-**Mutating tools** (10) — `create_*`, `update_*`, `add_member_qualification`,
+**Mutating tools** (11) — `create_*`, `update_*`, `add_member_qualification`,
 `manage_attendance`:
 
 1. Schema includes the shared `dryRunShape` (`dry_run: boolean`, default `true`).
@@ -232,13 +232,15 @@ explanation regardless of where the failure came from.
 | **Missing/invalid mutating input** | `validateActivityMinimums` / `rejectIfNoUpdateFields` | `isError: true`, question-phrased text — LLM relays as user prompt. No API call. | `mcp-d4h/needsMoreInfo: true` + structured `missing[]` / `invalid[]` |
 | **Unavailable endpoint** | stub handler (e.g. PATCH `/member-qualification-awards` not in spec) | `isError: true`, reason text pointing at the D4H web interface. No API call. | `mcp-d4h/unavailable: true` + `specVersion` |
 | **Dry-run preview** | `previewRequest` (mutating tools when `dry_run !== false`) | `isError: false` (not an error). JSON preview of the would-be request. No API call. | `mcp-d4h/dryRun: true` + resolved `preview` |
+| **Module not enabled** | `isModuleDisabledError(err, key)` in `src/d4h.ts`, mapped by `moduleNotEnabled()` (`get_equipment_funds`, `create_equipment_fund` → `equipment_funding`) | `isError: true`, plain "module is not enabled for this team" text instead of the raw 403 | `mcp-d4h/moduleNotEnabled: true` + `mcp-d4h/module` |
+| **Equipment costing gate** | cost field named in `update_equipment` (pre-flight, no request), or `permissionFailure(err)` reporting `requiredPermissions: UPDATE_COSTING` | `isError: true`, "Equipment costing requires the UPDATE_COSTING permission (separate from general Equipment edit access)" plus how to set costing | `mcp-d4h/costingPermission: true` + `requiredPermission` + `fields[]` |
 
 `D4HApiError` carries `status`, `endpoint`, and a **truncated** JSON summary
 of the response body (max 500 chars) so error messages are useful without
 dumping huge payloads at the LLM.
 
-The three new `_meta`-tagged response classes (`needsMoreInfo`,
-`unavailable`, `dryRun`) let MCP hosts that inspect `_meta` render them
+The five `_meta`-tagged response classes (`needsMoreInfo`, `unavailable`,
+`dryRun`, `moduleNotEnabled`, `costingPermission`) let MCP hosts that inspect `_meta` render them
 distinctly (e.g. "needs your input" UI vs an actual error). Hosts that
 only read `text` content fall back to the human-readable message.
 

@@ -202,9 +202,9 @@ In a new conversation, look for the tool indicator in the input area
 (🔧 / "Search and tools" / similar — UI varies by version). You should see:
 
 - A server named **`d4h`**
-- With **25 tools** total, grouped as:
-  - **13 read tools** — `get_members`, `get_member`, `get_qualifications`, `get_member_qualification_awards`, `get_incidents`, `get_incident`, `get_exercises`, `get_events`, `get_attendance`, `get_groups`, `get_tasks`, `get_equipment`, `search_team`
-  - **9 mutating tools** — `create_event`, `create_exercise`, `create_incident`, `update_event`, `update_exercise`, `update_incident`, `create_equipment`, `update_equipment`, `add_member_qualification` (all default to `dry_run: true` — preview before sending)
+- With **28 tools** total, grouped as:
+  - **14 read tools** — `get_members`, `get_member`, `get_qualifications`, `get_member_qualification_awards`, `get_incidents`, `get_incident`, `get_exercises`, `get_events`, `get_attendance`, `get_groups`, `get_tasks`, `get_equipment`, `get_equipment_funds`, `search_team`
+  - **11 mutating tools** — `create_event`, `create_exercise`, `create_incident`, `update_event`, `update_exercise`, `update_incident`, `create_equipment`, `update_equipment`, `create_equipment_fund`, `add_member_qualification`, `manage_attendance` (all default to `dry_run: true` — preview before sending)
   - **3 unavailable stubs** — `assign_equipment_to_member`, `unassign_equipment_from_member`, `update_member_qualification` (registered for discoverability; return a structured "unavailable" response pointing at the D4H web interface)
 
 If `d4h` is missing or shows 0 tools, check the Claude Desktop MCP log:
@@ -351,7 +351,7 @@ Release history: [GitHub Releases](https://github.com/gfnord/mcp-d4h/releases).
 ## See also
 
 - [README](../README.md) — project overview and quick start
-- [docs/tools.md](./tools.md) — full input/output reference for all 25 tools (read, mutating, and unavailable stubs)
+- [docs/tools.md](./tools.md) — full input/output reference for all 28 tools (read, mutating, and unavailable stubs)
 - [docs/configuration.md](./configuration.md) — env vars, PAT generation, region details
 - [docs/architecture.md](./architecture.md) — how the server is wired internally
 - [docs/development.md](./development.md) — dev workflow, adding tools, release process

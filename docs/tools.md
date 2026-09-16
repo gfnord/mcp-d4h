@@ -3,10 +3,10 @@
 Every tool exposed by `mcp-d4h` is documented here with its **input schema**,
 **output shape**, an **example call**, and the **D4H endpoint** it hits.
 
-Tools registered: **26** (all D4H Team Manager API, spec v7.0.1, URL prefix `/v3`).
+Tools registered: **28** (all D4H Team Manager API, spec v7.0.1, URL prefix `/v3`).
 
-- **13 read** tools (`get_*`, `search_team`)
-- **10 mutating** tools (`create_*`, `update_*`, `add_member_qualification`, `manage_attendance`) — all default `dry_run: true`
+- **14 read** tools (`get_*`, `search_team`)
+- **11 mutating** tools (`create_*`, `update_*`, `add_member_qualification`, `manage_attendance`) — all default `dry_run: true`
 - **3 unavailable stubs** (`update_member_qualification`, `assign_equipment_to_member`, `unassign_equipment_from_member`) — registered for discoverability; return a structured "unavailable" response pointing at the D4H web interface
 
 | Tool                                | Kind | Section |
@@ -23,6 +23,7 @@ Tools registered: **26** (all D4H Team Manager API, spec v7.0.1, URL prefix `/v3
 | `get_groups`                        | read | [↓](#get_groups) |
 | `get_tasks`                         | read | [↓](#get_tasks) |
 | `get_equipment`                     | read | [↓](#get_equipment) |
+| `get_equipment_funds`               | read | [↓](#get_equipment_funds) |
 | `search_team`                       | read | [↓](#search_team) |
 | `create_event`                      | mutate | [↓](#create_event) |
 | `create_exercise`                   | mutate | [↓](#create_exercise) |
@@ -32,6 +33,7 @@ Tools registered: **26** (all D4H Team Manager API, spec v7.0.1, URL prefix `/v3
 | `update_incident`                   | mutate | [↓](#update_incident) |
 | `create_equipment`                  | mutate | [↓](#create_equipment) |
 | `update_equipment`                  | mutate | [↓](#update_equipment) |
+| `create_equipment_fund`             | mutate | [↓](#create_equipment_fund) |
 | `assign_equipment_to_member`        | ⛔ unavailable | [↓](#assign_equipment_to_member) |
 | `unassign_equipment_from_member`    | ⛔ unavailable | [↓](#unassign_equipment_from_member) |
 | `add_member_qualification`          | mutate | [↓](#add_member_qualification) |
@@ -74,6 +76,14 @@ Three tools are **registered for discoverability** but the underlying D4H v3 API
 - `assign_equipment_to_member` — PATCH `/equipment/{id}` rejects every variant of location/member/assignedTo fields (verified by live probe)
 - `unassign_equipment_from_member` — same constraint as assign
 
+### Module-gated resources
+
+D4H gates whole resources behind **modules** (the API spec annotates each endpoint with its "Required modules"; state is readable at `/modules?setting=<key>`). When a tool's endpoint needs a module the team does not have, the tool returns a clean refusal (`isError: true`, `_meta["mcp-d4h/moduleNotEnabled"] = true`, `_meta["mcp-d4h/module"] = "<key>"`) instead of a raw API error:
+
+- `get_equipment_funds`, `create_equipment_fund` — require `equipment_funding`
+
+Permission failures are kept distinct: D4H answers those with `errors:authorization:insufficientPermissions` and never mentions a module.
+
 ### Error model
 
 All errors come back as MCP results with `isError: true` and a `text` content block. The server does not crash. See [Error responses](#error-responses) at the bottom of this document for full examples.
@@ -95,6 +105,10 @@ Examples use real demo records from the test team:
 > **Method:** `GET` · **Path:** `/v3/team/{D4H_TEAM_ID}/members`
 
 List or search team members.
+
+> **Costing:** the raw D4H `Member` object is returned unmodified — there is no
+> field allow-list — so the costing rates `costPerHour` and `costPerUse` are
+> included in every result (verified live against team `501`).
 
 ### Input
 
@@ -135,6 +149,11 @@ List or search team members.
 > **Method:** `GET` · **Path:** `/v3/team/{D4H_TEAM_ID}/members/{id}`
 
 Get the full detail record for one team member.
+
+> **Costing:** returns the raw `Member` detail record, `costPerHour` and
+> `costPerUse` included (verified live). Member costing is **read-only** in this
+> server — there is deliberately no `update_member` tool, matching the existing
+> no-member-PATCH pattern.
 
 ### Input
 
@@ -530,6 +549,12 @@ to members and optionally linked to a target resource.
 
 Search the equipment inventory.
 
+> **Costing:** the raw D4H `Equipment` object is returned unmodified, so
+> `costPerHour`, `costPerUse`, `costPerDistance`, `replacementCost`,
+> `totalReplacementCost`, `costRepairs`, and `fund` are all included (verified
+> live). Funding sources are listed by
+> [`get_equipment_funds`](#get_equipment_funds).
+
 ### Input
 
 | Field         | Type | Required | Description |
@@ -563,6 +588,80 @@ Search the equipment inventory.
   "pageSize": 20,
   "totalSize": 14
 }
+```
+
+---
+
+## `get_equipment_funds`
+
+> **Method:** `GET` · **Path:** `/v3/{context}/{contextId}/equipment-funds` · **Module:** `equipment_funding`
+
+List equipment funding sources — the budget lines, grants, and donations that
+equipment purchases are booked against. This is the standalone funding resource;
+per-item and per-person cost *rates* live on the resources themselves (see
+[`get_equipment`](#get_equipment), [`get_member`](#get_member)).
+
+> **Units:** `value` and `spentTotal` are integers in **whole cents** (or the
+> team currency's sub-unit). `value: 120000` is $1,200.00.
+
+> If the `equipment_funding` module is off, the tool returns the
+> [module-not-enabled refusal](#modulenotenabled-module-gated-tools) rather than
+> an API error.
+
+### Input
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `page`, `size` | int | no | Pagination. |
+| `id` | integer[] | no | Return only these fund IDs (sent as `id[]=…`). |
+| `title` | string | no | Text search compared against the fund title. |
+| `exclude_org_data` | boolean | no | Team context only: exclude funds inherited from the team's organisation. Default `false`. |
+| `exclude_teams_data` | boolean | no | Organisation context only: exclude funds belonging to accessible teams. Default `false`. |
+| `sort` | enum | no | One of `createdAt`, `updatedAt`, `id`, `title`. Default `id`. |
+| `order` | enum | no | `asc` or `desc`. Default `asc`. |
+| `context` | enum | no | `team` (default, uses `D4H_TEAM_ID`), `organisation`, or `admin`. |
+| `context_id` | integer | no | Numeric ID matching `context`. Required when `context` is not `team`. |
+
+### Example call
+
+```json
+{
+  "name": "get_equipment_funds",
+  "arguments": { "size": 2, "sort": "title", "order": "asc" }
+}
+```
+
+### Example output (real, team `501`)
+
+```json
+{
+  "results": [
+    {
+      "owner": { "resourceType": "Team", "id": 501 },
+      "id": 401,
+      "title": "Donation",
+      "value": 120000,
+      "spentTotal": 120000,
+      "equipTotal": 1,
+      "resourceType": "EquipmentFund",
+      "createdAt": "2022-06-07T06:55:04.000Z",
+      "updatedAt": "2022-06-07T06:55:04.000Z"
+    }
+  ],
+  "page": 0,
+  "pageSize": 250,
+  "totalSize": 5
+}
+```
+
+### Example: non-team context without an ID
+
+```json
+{ "name": "get_equipment_funds", "arguments": { "context": "organisation" } }
+```
+
+```text
+Error: context_id is required when context is "organisation" — pass the numeric organisation ID.
 ```
 
 ---
@@ -967,10 +1066,16 @@ Create a new equipment item. **To assign the item to a member AT CREATION**, set
 
 Update an equipment item. **Allowed fields are limited by the API**: only `status`, `isCritical`, `isMonitor`, `barcode`, `updateNotes`, `customFieldValues`. `location`/member assignment cannot be changed via this tool (see [`assign_equipment_to_member`](#assign_equipment_to_member)).
 
+> **Costing:** the PATCH *response* is the raw `Equipment` object, so
+> `costPerHour`, `costPerUse`, `costPerDistance`, `replacementCost`,
+> `totalReplacementCost`, `costRepairs`, and `fund` come back untouched
+> (verified live). Those fields cannot be *written* here — see below.
+
 ### Limitations
 
 - **`status: "RETIRED"` is intentionally NOT supported** — the spec excludes it from the PATCH enum because retirement is a separate workflow with a required reason. To retire an item, use the D4H web interface.
 - **Member assignment cannot be updated** — see Blocker 2 in the v0.3.0 release notes.
+- **Cost fields cannot be updated.** `costPerHour`, `costPerUse`, `costPerDistance`, `replacementCost`, and `fundId` are rejected by the endpoint with HTTP 400 `unrecognized_keys` (live-probed), and D4H gates equipment costing behind the dedicated `Equipment.UPDATE_COSTING` permission — listed separately from `Equipment.UPDATE` in the `whoami` permissions payload. The tool recognizes these fields and answers with the costing explanation **before** sending anything (so a `dry_run` preview is replaced by it too).
 
 ### Input
 
@@ -982,6 +1087,7 @@ Update an equipment item. **Allowed fields are limited by the API**: only `statu
 | `barcode` | string \| null | no | New barcode (null to clear). |
 | `updateNotes` | string | no | Notes about this change for the audit log. |
 | `customFieldValues` | array | no | Custom field values. |
+| `costPerHour`, `costPerUse`, `costPerDistance`, `replacementCost`, `fundId` | number | no | **Recognized but never sent** — returns the [costing-permission response](#costingpermission-equipment-costing). |
 | `dry_run` | boolean | no | Default `true`. |
 
 ### Example: dry_run preview (mark unserviceable)
@@ -1008,12 +1114,125 @@ Invalid input:
   • (body): no fields to update — provide at least one field to change
 ```
 
+### Example: cost field → costing permission (no request sent)
+
+```json
+{ "name": "update_equipment", "arguments": { "id": 204937, "costPerHour": 100 } }
+```
+
+```text
+Equipment costing requires the UPDATE_COSTING permission (separate from general Equipment edit access).
+
+Requested cost field(s): costPerHour. PATCH /equipment/{id} does not accept them at all — the endpoint answers HTTP 400 `unrecognized_keys` (live-probed). Nothing was sent.
+
+To change costing: pass `fundId` / `replacementCost` when the item is created with `create_equipment`, set the per-hour / per-use / per-distance rates on the equipment KIND, or edit the item in the D4H web interface with an account that holds Equipment UPDATE_COSTING. Funding sources themselves are read with `get_equipment_funds` and created with `create_equipment_fund`.
+```
+
+A live HTTP 403 whose payload cites a costing permission
+(`requiredPermissions: "UPDATE_COSTING"`) is mapped to the same response
+instead of a generic API error.
+
 ### Example: real round-trip (against test item `204937`)
 
 ```json
 {
   "name": "update_equipment",
   "arguments": { "id": 204937, "isMonitor": true, "updateNotes": "Tracking smoke test", "dry_run": false }
+}
+```
+
+---
+
+## `create_equipment_fund`
+
+> **Method:** `POST` · **Path:** `/v3/team/{D4H_TEAM_ID}/equipment-funds` · **Module:** `equipment_funding` · ⚠️ **MUTATES** · `dry_run` defaults to `true`
+
+Create an equipment funding source on the configured team.
+
+> **Units:** `value` is an integer in **whole cents** — pass `120000` for
+> $1,200.00, not `1200`. Fractional and negative values are rejected
+> client-side.
+
+### Input
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `title` | string | **yes** | Fund name, 1–60 characters. |
+| `value` | integer | **yes** | Fund size in whole cents, `>= 0`. |
+| `dry_run` | boolean | no | Default `true`. |
+
+### Example: dry_run preview (default)
+
+```json
+{
+  "name": "create_equipment_fund",
+  "arguments": { "title": "2026 PPE Grant", "value": 120000 }
+}
+```
+
+```json
+{
+  "dry_run": true,
+  "note": "DRY RUN. No request was sent. Re-invoke with `dry_run: false` to actually send the request.",
+  "request": {
+    "method": "POST",
+    "url": "https://api.team-manager.ca.d4h.com/v3/team/501/equipment-funds",
+    "headers": { "Authorization": "Bearer <REDACTED>", "Content-Type": "application/json" },
+    "body": { "title": "2026 PPE Grant", "value": 120000 }
+  }
+}
+```
+
+### Example: missing fields → needsMoreInfo
+
+```json
+{ "name": "create_equipment_fund", "arguments": {} }
+```
+
+```text
+Cannot create this equipment fund yet.
+
+I still need:
+  • fund title (title) — text, 1–60 characters, e.g. "2026 PPE Grant"
+  • fund value in whole cents (value) — integer number of cents, 0 or greater, e.g. 120000
+
+Please provide fund title, fund value in whole cents.
+```
+
+### Example: fractional value → needsMoreInfo
+
+```json
+{ "name": "create_equipment_fund", "arguments": { "title": "Smoke", "value": 10.5 } }
+```
+
+```text
+Invalid input:
+  • value: must be a whole number of cents, not a fractional amount (got 10.5). For $1,200.00 pass 120000.
+```
+
+### Example: real round-trip
+
+```json
+{
+  "name": "create_equipment_fund",
+  "arguments": { "title": "2026 PPE Grant", "value": 120000, "dry_run": false }
+}
+```
+
+Response is the created fund (`spentTotal` / `equipTotal` come back `null` on
+creation and read back as `0`):
+
+```json
+{
+  "owner": { "resourceType": "Team", "id": 501 },
+  "id": 566,
+  "title": "2026 PPE Grant",
+  "value": 120000,
+  "spentTotal": null,
+  "equipTotal": null,
+  "resourceType": "EquipmentFund",
+  "createdAt": "2026-09-16T18:40:01.000Z",
+  "updatedAt": "2026-09-16T18:40:01.000Z"
 }
 ```
 
@@ -1416,6 +1635,45 @@ Returned by the three registered-but-unsupported tools. Distinguishable by `_met
     "mcp-d4h/unavailable": true,
     "mcp-d4h/tool": "update_member_qualification",
     "mcp-d4h/specVersion": "7.0.1"
+  }
+}
+```
+
+### `moduleNotEnabled` (module-gated tools)
+
+Returned when the endpoint's D4H module is not enabled for the team. Distinguishable by `_meta["mcp-d4h/moduleNotEnabled"] = true`. The failing API response is not surfaced raw.
+
+```json
+{
+  "isError": true,
+  "content": [{
+    "type": "text",
+    "text": "Equipment funds is not available: the D4H `equipment_funding` module is not enabled for this team. Ask a D4H team administrator to enable it (module state is visible in Team Manager under the team's settings). No other tool can work around this — the data does not exist until the module is on."
+  }],
+  "_meta": {
+    "mcp-d4h/moduleNotEnabled": true,
+    "mcp-d4h/module": "equipment_funding",
+    "mcp-d4h/tool": "get_equipment_funds"
+  }
+}
+```
+
+### `costingPermission` (equipment costing)
+
+Returned by `update_equipment` when the call names a cost field, or when D4H answers with an HTTP 403 whose `requiredPermissions` cites costing. Distinguishable by `_meta["mcp-d4h/costingPermission"] = true`.
+
+```json
+{
+  "isError": true,
+  "content": [{
+    "type": "text",
+    "text": "Equipment costing requires the UPDATE_COSTING permission (separate from general Equipment edit access). ..."
+  }],
+  "_meta": {
+    "mcp-d4h/costingPermission": true,
+    "mcp-d4h/tool": "update_equipment",
+    "mcp-d4h/requiredPermission": "UPDATE_COSTING",
+    "mcp-d4h/fields": ["costPerHour"]
   }
 }
 ```

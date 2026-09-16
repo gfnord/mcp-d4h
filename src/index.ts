@@ -27,6 +27,10 @@ import {
   MemberQualificationAwardCreateBody,
   AttendanceCreateBody,
   AttendanceUpdateBody,
+  EquipmentFundCreateBody,
+  isModuleDisabledError,
+  permissionFailure,
+  PermissionFailure,
 } from "./d4h.js";
 
 // ---------------------------------------------------------------------------
@@ -87,6 +91,36 @@ function handleError(toolName: string, err: unknown): ToolResult {
   const message = err instanceof Error ? err.message : String(err);
   console.error(`[mcp-d4h] ${toolName} -> Unexpected error: ${message}`);
   return fail(`Unexpected error: ${message}`);
+}
+
+/**
+ * Clean refusal for endpoints D4H gates behind a module the account does not
+ * have. Distinguishable by `_meta["mcp-d4h/moduleNotEnabled"]`, mirroring the
+ * `unavailable` / `needsMoreInfo` result shapes.
+ */
+function moduleNotEnabled(
+  toolName: string,
+  moduleKey: string,
+  resource: string
+): ToolResult {
+  return {
+    content: [
+      {
+        type: "text",
+        text:
+          `${resource} is not available: the D4H \`${moduleKey}\` module is not enabled ` +
+          `for this team. Ask a D4H team administrator to enable it (module state is ` +
+          `visible in Team Manager under the team's settings). No other tool can work ` +
+          `around this — the data does not exist until the module is on.`,
+      },
+    ],
+    isError: true,
+    _meta: {
+      "mcp-d4h/moduleNotEnabled": true,
+      "mcp-d4h/module": moduleKey,
+      "mcp-d4h/tool": toolName,
+    },
+  };
 }
 
 function requireTeamManager(): NonNullable<D4HClients["teamManager"]> {
@@ -552,6 +586,90 @@ server.registerTool(
   }
 );
 
+server.registerTool(
+  "get_equipment_funds",
+  {
+    title: "List D4H equipment funds (funding sources)",
+    description:
+      "List equipment funding sources from `/{context}/{contextId}/equipment-funds` — the " +
+      "budget lines, grants, and donations that equipment purchases are booked against. Each " +
+      "fund carries `title`, `value` (fund size), `spentTotal` (booked spend), `equipTotal` " +
+      "(number of items bought against it), `owner`, `createdAt`, and `updatedAt`. " +
+      "UNITS: `value` and `spentTotal` are integers in WHOLE CENTS (or the team currency's " +
+      "sub-unit) — `value: 120000` means $1,200.00. Requires the D4H `equipment_funding` " +
+      "module; when it is off the tool says so instead of returning a raw API error.",
+    inputSchema: {
+      ...paginationShape,
+      id: z
+        .array(z.number().int())
+        .optional()
+        .describe("Return only these fund IDs (sent as `id[]=…`)."),
+      title: z
+        .string()
+        .optional()
+        .describe("Text search compared against the fund title."),
+      exclude_org_data: z
+        .boolean()
+        .optional()
+        .describe(
+          "Team context only: exclude funds inherited from the team's organisation. Default false."
+        ),
+      exclude_teams_data: z
+        .boolean()
+        .optional()
+        .describe(
+          "Organisation context only: exclude funds belonging to accessible teams. Default false."
+        ),
+      sort: z
+        .enum(["createdAt", "updatedAt", "id", "title"])
+        .optional()
+        .describe("Sort field. Default `id`."),
+      order: z
+        .enum(["asc", "desc"])
+        .optional()
+        .describe("Sort order. Default `asc`."),
+      context: z
+        .enum(["team", "organisation", "admin"])
+        .optional()
+        .describe(
+          "Point of view for the request. Default `team`, which uses the configured D4H_TEAM_ID."
+        ),
+      context_id: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "Numeric ID matching `context`. Defaults to the configured team ID; required when `context` is not `team`."
+        ),
+    },
+  },
+  async ({ context, context_id, ...params }): Promise<ToolResult> => {
+    try {
+      const tm = requireTeamManager();
+      if (context && context !== "team" && context_id === undefined) {
+        return fail(
+          `context_id is required when context is "${context}" — pass the numeric ${context} ID.`
+        );
+      }
+      const result = await tm.listEquipmentFunds({
+        context,
+        context_id,
+        ...params,
+      });
+      return okJson(result);
+    } catch (err) {
+      if (isModuleDisabledError(err, "equipment_funding")) {
+        return moduleNotEnabled(
+          "get_equipment_funds",
+          "equipment_funding",
+          "Equipment funds"
+        );
+      }
+      return handleError("get_equipment_funds", err);
+    }
+  }
+);
+
 // ---------------------------------------------------------------------------
 // Global search
 // ---------------------------------------------------------------------------
@@ -618,7 +736,8 @@ interface MissingField {
   field: string;
   label: string;
   expected: string;
-  example: string;
+  /** Rendered with JSON.stringify — numbers stay unquoted for numeric fields. */
+  example: string | number;
   reason: string;
 }
 
@@ -1232,6 +1351,76 @@ server.registerTool(
 // Equipment — create / update
 // ---------------------------------------------------------------------------
 
+/**
+ * Cost fields carried by an equipment item. PATCH `/equipment/{id}` accepts
+ * none of them — a live probe returns HTTP 400 `unrecognized_keys` for
+ * `costPerHour`, `replacementCost`, and `fundId` — and D4H additionally gates
+ * costing behind `Equipment.UPDATE_COSTING`, which the `whoami` permissions
+ * payload lists separately from `Equipment.UPDATE`.
+ */
+const EQUIPMENT_COST_FIELDS = [
+  "costPerHour",
+  "costPerUse",
+  "costPerDistance",
+  "replacementCost",
+  "fundId",
+] as const;
+
+const COSTING_PERMISSION_MESSAGE =
+  "Equipment costing requires the UPDATE_COSTING permission (separate from general Equipment edit access).";
+
+/**
+ * Result for both costing paths: a caller asking `update_equipment` to change
+ * cost fields (caught before any request, so it also replaces the dry-run
+ * preview), and a live HTTP 403 whose `requiredPermissions` cites costing.
+ */
+function costingRequiresPermission(
+  toolName: string,
+  fields: readonly string[],
+  failure?: PermissionFailure
+): ToolResult {
+  const lines: string[] = [COSTING_PERMISSION_MESSAGE, ""];
+
+  if (fields.length > 0) {
+    lines.push(
+      `Requested cost field(s): ${fields.join(", ")}. PATCH /equipment/{id} does not ` +
+        "accept them at all — the endpoint answers HTTP 400 `unrecognized_keys` " +
+        "(live-probed). Nothing was sent."
+    );
+  } else {
+    lines.push(
+      "D4H answered this equipment update with HTTP 403 on a costing-gated field."
+    );
+  }
+
+  if (failure?.requiredPermissions) {
+    lines.push(
+      `D4H reported resourceType=${failure.resourceType ?? "Equipment"}, ` +
+        `requiredPermissions=${failure.requiredPermissions}.`
+    );
+  }
+
+  lines.push("");
+  lines.push(
+    "To change costing: pass `fundId` / `replacementCost` when the item is created with " +
+      "`create_equipment`, set the per-hour / per-use / per-distance rates on the equipment " +
+      "KIND, or edit the item in the D4H web interface with an account that holds Equipment " +
+      "UPDATE_COSTING. Funding sources themselves are read with `get_equipment_funds` and " +
+      "created with `create_equipment_fund`."
+  );
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+    isError: true,
+    _meta: {
+      "mcp-d4h/costingPermission": true,
+      "mcp-d4h/tool": toolName,
+      "mcp-d4h/requiredPermission": "UPDATE_COSTING",
+      "mcp-d4h/fields": [...fields],
+    },
+  };
+}
+
 server.registerTool(
   "create_equipment",
   {
@@ -1332,7 +1521,9 @@ server.registerTool(
       "Update an equipment item via PATCH /equipment/{id}. MUTATES data. dry_run defaults to true. " +
       "Only allowed fields: status, isCritical, isMonitor, barcode, updateNotes, customFieldValues. " +
       "NOTE: `RETIRED` is INTENTIONALLY excluded from the status enum — equipment cannot be retired via API; use the D4H web interface. " +
-      "Likewise, member assignment cannot be changed via this endpoint (see assign_equipment_to_member).",
+      "Likewise, member assignment cannot be changed via this endpoint (see assign_equipment_to_member). " +
+      "COSTING: cost fields (costPerHour, costPerUse, costPerDistance, replacementCost, fundId) are NOT accepted by this endpoint, " +
+      "and equipment costing is gated by the separate Equipment UPDATE_COSTING permission — passing one returns that explanation instead of a request.",
     inputSchema: {
       id: z
         .number()
@@ -1365,11 +1556,45 @@ server.registerTool(
         .array(z.unknown())
         .optional()
         .describe("Custom field values to set."),
+      costPerHour: z
+        .number()
+        .optional()
+        .describe(
+          "NOT SETTABLE HERE. Hourly cost rate. PATCH /equipment/{id} rejects cost fields with HTTP 400, and costing needs the Equipment UPDATE_COSTING permission; passing this returns that explanation instead of sending a request."
+        ),
+      costPerUse: z
+        .number()
+        .optional()
+        .describe("NOT SETTABLE HERE — see costPerHour."),
+      costPerDistance: z
+        .number()
+        .optional()
+        .describe("NOT SETTABLE HERE — see costPerHour."),
+      replacementCost: z
+        .number()
+        .optional()
+        .describe(
+          "NOT SETTABLE HERE — see costPerHour. Settable at creation via create_equipment."
+        ),
+      fundId: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "NOT SETTABLE HERE — see costPerHour. Settable at creation via create_equipment; list funds with get_equipment_funds."
+        ),
       ...dryRunShape,
     },
   },
   async ({ id, dry_run, ...args }): Promise<ToolResult> => {
     try {
+      const costFields = EQUIPMENT_COST_FIELDS.filter(
+        (field) => args[field] !== undefined
+      );
+      if (costFields.length > 0) {
+        return costingRequiresPermission("update_equipment", costFields);
+      }
+
       const reject = rejectIfNoUpdateFields(args, "update_equipment");
       if (reject) return reject;
 
@@ -1383,7 +1608,105 @@ server.registerTool(
       const result = await tm.updateEquipment(id, body);
       return okJson(result);
     } catch (err) {
+      const failure = permissionFailure(err);
+      if (failure && /COSTING/i.test(failure.requiredPermissions ?? "")) {
+        return costingRequiresPermission("update_equipment", [], failure);
+      }
       return handleError("update_equipment", err);
+    }
+  }
+);
+
+server.registerTool(
+  "create_equipment_fund",
+  {
+    title: "Create a D4H equipment fund (MUTATES)",
+    description:
+      "Create an equipment funding source via POST /team/{teamId}/equipment-funds. MUTATES data. " +
+      "dry_run defaults to true. Required: `title` (1–60 characters) and `value`. " +
+      "UNITS: `value` is an integer in WHOLE CENTS (or the team currency's sub-unit), minimum 0 — " +
+      "pass 120000 for $1,200.00, not 1200. Requires the D4H equipment funding module; when it is " +
+      "off the tool says so instead of returning a raw API error. Existing funds: `get_equipment_funds`.",
+    inputSchema: {
+      title: z
+        .string()
+        .optional()
+        .describe(
+          "Fund name, 1–60 characters. Required. e.g. \"2026 PPE Grant\""
+        ),
+      value: z
+        .number()
+        .optional()
+        .describe(
+          "Fund size as a whole number of CENTS (integer, >= 0). Required. e.g. 120000 for $1,200.00"
+        ),
+      ...dryRunShape,
+    },
+  },
+  async ({ dry_run, ...args }): Promise<ToolResult> => {
+    try {
+      const missing: MissingField[] = [];
+      const invalid: InvalidField[] = [];
+
+      if (args.title === undefined || args.title.length === 0) {
+        missing.push({
+          field: "title",
+          label: "fund title",
+          expected: "text, 1–60 characters",
+          example: "2026 PPE Grant",
+          reason: "required_for_equipment_fund",
+        });
+      } else if (args.title.length > 60) {
+        invalid.push({
+          field: "title",
+          reason: `too long — 60 characters maximum (got ${args.title.length})`,
+        });
+      }
+
+      if (args.value === undefined) {
+        missing.push({
+          field: "value",
+          label: "fund value in whole cents",
+          expected: "integer number of cents, 0 or greater",
+          example: 120000,
+          reason: "required_for_equipment_fund",
+        });
+      } else if (!Number.isInteger(args.value)) {
+        invalid.push({
+          field: "value",
+          reason: `must be a whole number of cents, not a fractional amount (got ${args.value}). For $1,200.00 pass 120000.`,
+        });
+      } else if (args.value < 0) {
+        invalid.push({
+          field: "value",
+          reason: `must be 0 or greater (got ${args.value})`,
+        });
+      }
+
+      if (missing.length > 0 || invalid.length > 0) {
+        return needsMoreInfo("create_equipment_fund", missing, invalid);
+      }
+
+      const tm = requireTeamManager();
+      const teamId = requireTeamId();
+      const body = stripUndefined(args) as EquipmentFundCreateBody;
+      const path = `/team/${teamId}/equipment-funds`;
+
+      if (dry_run !== false) {
+        return previewRequest("create_equipment_fund", "POST", path, body);
+      }
+
+      const result = await tm.createEquipmentFund(body);
+      return okJson(result);
+    } catch (err) {
+      if (isModuleDisabledError(err, "equipment_funding")) {
+        return moduleNotEnabled(
+          "create_equipment_fund",
+          "equipment_funding",
+          "Equipment funds"
+        );
+      }
+      return handleError("create_equipment_fund", err);
     }
   }
 );

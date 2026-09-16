@@ -111,6 +111,81 @@ function safeJsonStringify(value: unknown, maxLen: number): string {
   }
 }
 
+/** Narrow an unknown value to a plain record without reaching for `any`. */
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/**
+ * True when a request failed because a D4H *module* is not enabled for the
+ * context, rather than because of permissions or auth scope. D4H gates whole
+ * resources behind modules — the spec annotates each endpoint with its
+ * "Required modules" (e.g. `equipment_funding` for the equipment-funds
+ * routes), and module state is readable at `/modules?setting=<key>`.
+ *
+ * A match requires module wording (or the module key itself) in the response
+ * body. The authorization failures observed live —
+ * `errors:authorization:insufficientPermissions`, `:noAuthContext`,
+ * `:notAdmin` — never mention a module, so they are not misclassified here.
+ */
+export function isModuleDisabledError(
+  err: unknown,
+  moduleKey: string
+): boolean {
+  if (!(err instanceof D4HApiError)) return false;
+  const haystack = `${err.message} ${safeJsonStringify(
+    err.details,
+    2_000
+  )}`.toLowerCase();
+  return (
+    haystack.includes("module") || haystack.includes(moduleKey.toLowerCase())
+  );
+}
+
+/** Parsed `errors:authorization:insufficientPermissions` detail. */
+export interface PermissionFailure {
+  /** Resource the check was made against, e.g. `Equipment`. */
+  resourceType?: string;
+  /** Permission(s) the caller lacks, e.g. `UPDATE_COSTING`. */
+  requiredPermissions?: string;
+}
+
+/**
+ * Extract D4H's permission-failure detail from a rejected request. Returns
+ * null unless the response was an HTTP 403 carrying
+ * `code: "errors:authorization:insufficientPermissions"`. Live-probed body:
+ *
+ * ```json
+ * { "code": "errors:authorization:insufficientPermissions", "status": 403,
+ *   "detailObj": { "data": { "resourceType": "Equipment",
+ *                            "requiredPermissions": "UPDATE_COSTING" } } }
+ * ```
+ */
+export function permissionFailure(err: unknown): PermissionFailure | null {
+  if (!(err instanceof D4HApiError) || err.status !== 403) return null;
+  const body = asRecord(err.details);
+  if (!body) return null;
+  const code = typeof body.code === "string" ? body.code : "";
+  if (!code.includes("insufficientPermissions")) return null;
+
+  const data = asRecord(asRecord(body.detailObj)?.data);
+  const failure: PermissionFailure = {};
+  if (typeof data?.resourceType === "string") {
+    failure.resourceType = data.resourceType;
+  }
+  const required = data?.requiredPermissions;
+  if (typeof required === "string") {
+    failure.requiredPermissions = required;
+  } else if (Array.isArray(required)) {
+    failure.requiredPermissions = required
+      .filter((p): p is string => typeof p === "string")
+      .join(", ");
+  }
+  return failure;
+}
+
 // ---------------------------------------------------------------------------
 // Team Manager client
 // ---------------------------------------------------------------------------
@@ -177,6 +252,35 @@ export interface TeamManagerEquipment {
   member?: { id: number; name?: string };
   [key: string]: unknown;
 }
+
+/**
+ * Record from the equipment-funds endpoints — a funding source / budget line
+ * that equipment purchases are booked against. Monetary amounts are integers
+ * in whole cents (or the team currency's sub-unit): `value: 120000` is
+ * $1,200.00.
+ */
+export interface TeamManagerEquipmentFund {
+  id: number;
+  title?: string;
+  /** Fund size, in whole cents. */
+  value?: number;
+  /** Amount already spent from the fund, in whole cents. */
+  spentTotal?: number;
+  /** Count of equipment items booked against the fund. */
+  equipTotal?: number;
+  owner?: { id: number; resourceType: string };
+  resourceType?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Point of view for the `/v3/{context}/{contextId}/…` routes (spec enum).
+ * This server is configured with a single team, so `team` is the default
+ * everywhere; the other contexts need an explicit context id.
+ */
+export type D4HContext = "team" | "organisation" | "admin";
 
 /**
  * Boundary type for the three "activity" surfaces — `/incidents`,
@@ -335,6 +439,16 @@ export interface EquipmentUpdateBody {
   barcode?: string | null;
   updateNotes?: string;
   customFieldValues?: unknown[];
+}
+
+/**
+ * POST /{context}/{contextId}/equipment-funds body. Per the spec, `title` is
+ * 1–60 characters and `value` is an integer in whole cents (min 0, max
+ * 2147483647) — both required.
+ */
+export interface EquipmentFundCreateBody {
+  title: string;
+  value: number;
 }
 
 /** Shared body shape for POST /events, /exercises, /incidents. */
@@ -516,6 +630,41 @@ export class TeamManagerClient {
         endpoint,
         { params }
       );
+      return data;
+    } catch (err) {
+      throw wrapAxiosError(err, endpoint);
+    }
+  }
+
+  /**
+   * GET /v3/{context}/{contextId}/equipment-funds
+   *
+   * Equipment funding sources (budget lines, grants, donations). Requires the
+   * `equipment_funding` module. `context` defaults to `team` and the context
+   * id to the configured team. Axios serializes `id` as `id[]=…`, which is
+   * the form this endpoint expects (verified live).
+   */
+  async listEquipmentFunds({
+    context = "team",
+    context_id,
+    ...params
+  }: {
+    context?: D4HContext;
+    context_id?: string | number;
+    page?: number;
+    size?: number;
+    id?: number[];
+    title?: string;
+    exclude_org_data?: boolean;
+    exclude_teams_data?: boolean;
+    sort?: "createdAt" | "updatedAt" | "id" | "title";
+    order?: "asc" | "desc";
+  } = {}): Promise<TeamManagerPage<TeamManagerEquipmentFund>> {
+    const endpoint = `/${context}/${context_id ?? this.teamId}/equipment-funds`;
+    try {
+      const { data } = await this.http.get<
+        TeamManagerPage<TeamManagerEquipmentFund>
+      >(endpoint, { params });
       return data;
     } catch (err) {
       throw wrapAxiosError(err, endpoint);
@@ -704,6 +853,28 @@ export class TeamManagerClient {
     const endpoint = `/team/${this.teamId}/equipment/${id}`;
     try {
       const { data } = await this.http.patch<TeamManagerEquipment>(
+        endpoint,
+        body
+      );
+      return data;
+    } catch (err) {
+      throw wrapAxiosError(err, endpoint);
+    }
+  }
+
+  /**
+   * POST /v3/team/{teamId}/equipment-funds
+   *
+   * Creates a funding source on the configured team. The spec annotates this
+   * verb with the `equipment` module (the list verb with
+   * `equipment_funding`), so either can gate it depending on the account.
+   */
+  async createEquipmentFund(
+    body: EquipmentFundCreateBody
+  ): Promise<TeamManagerEquipmentFund> {
+    const endpoint = `/team/${this.teamId}/equipment-funds`;
+    try {
+      const { data } = await this.http.post<TeamManagerEquipmentFund>(
         endpoint,
         body
       );

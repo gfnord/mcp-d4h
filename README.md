@@ -29,9 +29,9 @@
 
 ## Tools
 
-**26 tools** total — **13 read**, **10 mutating** (default `dry_run: true`), and **3 stubs registered as unavailable** (registered for LLM discoverability; return a structured "unavailable" response pointing at the D4H web interface).
+**28 tools** total — **14 read**, **11 mutating** (default `dry_run: true`), and **3 stubs registered as unavailable** (registered for LLM discoverability; return a structured "unavailable" response pointing at the D4H web interface).
 
-### Read tools (13)
+### Read tools (14)
 
 | Tool                              | What it does                                                                  |
 |-----------------------------------|-------------------------------------------------------------------------------|
@@ -47,9 +47,10 @@
 | `get_groups`                      | List personnel groups (sub-teams).                                            |
 | `get_tasks`                       | List tasks (action items, follow-ups, repairs).                               |
 | `get_equipment`                   | Search equipment inventory by status, location, owner, kind, ref, etc.        |
+| `get_equipment_funds`             | List equipment funds (funding sources) with value/spend/item counts.          |
 | `search_team`                     | Heterogeneous global search across all resource types.                        |
 
-### Mutating tools (10) — all default `dry_run: true`
+### Mutating tools (11) — all default `dry_run: true`
 
 | Tool                          | What it does                                                                       |
 |-------------------------------|------------------------------------------------------------------------------------|
@@ -61,6 +62,7 @@
 | `update_incident`             | Update an existing incident. Most common use: set `endsAt` to close it out.        |
 | `create_equipment`            | Create a new equipment item. To assign to a member at creation, use `location: { resourceType: "Member", id }`. |
 | `update_equipment`            | Update equipment status/notes/flags. `RETIRED` status NOT supported via API.      |
+| `create_equipment_fund`       | Create an equipment funding source. Requires `title` (1–60 chars) and `value` in whole cents. |
 | `add_member_qualification`    | Award a qualification to a member. Supports `memberId: "me"` for the caller.      |
 | `manage_attendance`           | Add / update / remove attendance (POST / PATCH / DELETE). Only DELETE in server — attendance is an edge, not an entity. |
 
@@ -132,6 +134,33 @@ Minimum environment variables:
 
 If credentials are missing, the server still boots — tool calls simply return
 a clean "client not configured" error.
+
+### Costing
+
+D4H has **no unified "costing report" endpoint**. Cost data is exposed
+per-resource, and this server passes those fields through untouched:
+
+| Where | Fields | Tool |
+|-------|--------|------|
+| `Member` | `costPerHour`, `costPerUse` | `get_members`, `get_member` (read-only — there is no member PATCH support) |
+| `Equipment` | `costPerHour`, `costPerUse`, `costPerDistance`, `replacementCost`, `totalReplacementCost`, `costRepairs`, `fund` | `get_equipment` (read), `create_equipment` (`fundId`, `replacementCost` at creation) |
+| `Role` | `cost.hour`, `cost.use` | D4H's `/roles` endpoint — **not wrapped** by this server; attendance records carry only a `{ resourceType, id }` role reference |
+| `EquipmentFund` | `value`, `spentTotal`, `equipTotal` | `get_equipment_funds`, `create_equipment_fund` |
+
+**Equipment Funds** is the standalone resource for budget / funding-source
+tracking (grants, donations, capital lines) that equipment purchases are booked
+against; it needs the `equipment_funding` module, and the tools return a clean
+"module not enabled" message when it is off.
+
+Two gotchas:
+
+- **Money is in whole cents** (or the team currency's sub-unit). `value: 120000`
+  is $1,200.00.
+- **Equipment costing cannot be edited via `update_equipment`.** `PATCH
+  /equipment/{id}` rejects cost fields outright, and D4H gates costing behind
+  the separate `Equipment.UPDATE_COSTING` permission (distinct from
+  `Equipment.UPDATE` in the `whoami` permissions payload). The tool says so
+  instead of firing a request that would fail.
 
 Full reference: **[docs/configuration.md](./docs/configuration.md)**.
 

@@ -38,7 +38,7 @@ Requirements:
 mcp-d4h/
 ├── src/
 │   ├── d4h.ts         # Typed axios client + D4HApiError + factory
-│   └── index.ts       # MCP server bootstrap + 26 tool registrations
+│   └── index.ts       # MCP server bootstrap + 28 tool registrations
 ├── docs/
 │   ├── architecture.md
 │   ├── configuration.md
