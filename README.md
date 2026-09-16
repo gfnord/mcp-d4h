@@ -11,7 +11,8 @@
 > A [Model Context Protocol](https://modelcontextprotocol.io) server that lets
 > LLM hosts (Claude Desktop, etc.) talk to the **D4H Team Manager API**
 > (spec version 7.0.1, URL prefix `/v3`) — read and manage personnel,
-> qualifications, equipment, activities, attendance, groups, tasks, and more —
+> qualifications, equipment, equipment funding, activities, attendance, groups,
+> tasks, and more —
 > through one stdio MCP server.
 
 ```text
@@ -47,7 +48,7 @@
 | `get_groups`                      | List personnel groups (sub-teams).                                            |
 | `get_tasks`                       | List tasks (action items, follow-ups, repairs).                               |
 | `get_equipment`                   | Search equipment inventory by status, location, owner, kind, ref, etc.        |
-| `get_equipment_funds`             | List equipment funds (funding sources) with value/spend/item counts.          |
+| `get_equipment_funds`             | List equipment funds — grants, donations, capital/budget lines — with `value`, `spentTotal`, `equipTotal`. |
 | `search_team`                     | Heterogeneous global search across all resource types.                        |
 
 ### Mutating tools (11) — all default `dry_run: true`
@@ -70,13 +71,51 @@
 
 | Tool                              | Why unavailable                                                                                                              |
 |-----------------------------------|------------------------------------------------------------------------------------------------------------------------------|
-| `assign_equipment_to_member`      | PATCH `/equipment/{id}` rejects every variant of `location`/`member`/`assignedTo` (HTTP 400, live-probed). Use the web UI.   |
+| `assign_equipment_to_member`      | PATCH `/equipment/{id}` rejects every variant of `location`/`member`/`assignedTo` (HTTP 400, live-probed). Assignment **at creation** does work — see `create_equipment`. Otherwise use the web UI. |
 | `unassign_equipment_from_member`  | Same constraint as `assign_equipment_to_member`. Use the web UI.                                                            |
 | `update_member_qualification`     | `/member-qualification-awards` has no PATCH/PUT verb. Awards are immutable via API. Use the web UI.                         |
 
 > **dry_run pattern**: every mutating tool defaults to `dry_run: true`. The tool validates inputs and returns a structured preview of the HTTP request that *would* be sent — without sending it. Set `dry_run: false` to actually send. Missing required fields return a `needsMoreInfo` response phrased as a question (the LLM naturally relays it to the user instead of fabricating values).
 
 All tools return structured JSON. Errors come back as MCP results with `isError: true` and a descriptive message — the server itself never crashes on a failed API call. See **[docs/tools.md](./docs/tools.md)** for full input schemas, examples, dry-run previews, `needsMoreInfo` shape, and per-tool round-trip recipes.
+
+### Safety posture
+
+- **Nothing is written without an explicit `dry_run: false`.** The default is always a preview.
+- **The server never deletes entities.** The only `DELETE` it can issue is on an attendance record — an edge linking a member to an activity, not the member or the activity itself.
+- **Credentials never leave the host config.** The PAT is read from the environment and dry-run previews render it as `Bearer <REDACTED>`.
+- **Costing is read-mostly.** Cost rates come back on every member/equipment payload, but member costing has no write path and equipment costing is blocked by D4H's separate `UPDATE_COSTING` permission — see [Costing](#costing).
+- **Failures are reported, not retried or hidden.** A non-2xx from D4H becomes a readable `isError` result; the server does not crash, retry blindly, or invent data.
+- **Module-gated resources say so.** If a resource needs a D4H module the team doesn't have (e.g. `equipment_funding` for Equipment Funds), the tool returns a plain "module not enabled" message instead of a raw 403.
+
+---
+
+## Costing
+
+D4H has **no unified "costing report" endpoint**. Cost data is exposed
+per-resource, and this server passes those fields through untouched:
+
+| Where | Fields | Tool |
+|-------|--------|------|
+| `Member` | `costPerHour`, `costPerUse` | `get_members`, `get_member` (read-only — there is no member PATCH support) |
+| `Equipment` | `costPerHour`, `costPerUse`, `costPerDistance`, `replacementCost`, `totalReplacementCost`, `costRepairs`, `fund` | `get_equipment` (read), `create_equipment` (`fundId`, `replacementCost` at creation) |
+| `Role` | `cost.hour`, `cost.use` | D4H's `/roles` endpoint — **not wrapped** by this server; attendance records carry only a `{ resourceType, id }` role reference |
+| `EquipmentFund` | `value`, `spentTotal`, `equipTotal` | `get_equipment_funds`, `create_equipment_fund` |
+
+**Equipment Funds** is the standalone resource for budget / funding-source
+tracking (grants, donations, capital lines) that equipment purchases are booked
+against; it needs the `equipment_funding` module, and the tools return a clean
+"module not enabled" message when it is off.
+
+Two gotchas:
+
+- **Money is in whole cents** (or the team currency's sub-unit). `value: 120000`
+  is $1,200.00.
+- **Equipment costing cannot be edited via `update_equipment`.** `PATCH
+  /equipment/{id}` rejects cost fields outright, and D4H gates costing behind
+  the separate `Equipment.UPDATE_COSTING` permission (distinct from
+  `Equipment.UPDATE` in the `whoami` permissions payload). The tool says so
+  instead of firing a request that would fail.
 
 ---
 
@@ -134,33 +173,6 @@ Minimum environment variables:
 
 If credentials are missing, the server still boots — tool calls simply return
 a clean "client not configured" error.
-
-### Costing
-
-D4H has **no unified "costing report" endpoint**. Cost data is exposed
-per-resource, and this server passes those fields through untouched:
-
-| Where | Fields | Tool |
-|-------|--------|------|
-| `Member` | `costPerHour`, `costPerUse` | `get_members`, `get_member` (read-only — there is no member PATCH support) |
-| `Equipment` | `costPerHour`, `costPerUse`, `costPerDistance`, `replacementCost`, `totalReplacementCost`, `costRepairs`, `fund` | `get_equipment` (read), `create_equipment` (`fundId`, `replacementCost` at creation) |
-| `Role` | `cost.hour`, `cost.use` | D4H's `/roles` endpoint — **not wrapped** by this server; attendance records carry only a `{ resourceType, id }` role reference |
-| `EquipmentFund` | `value`, `spentTotal`, `equipTotal` | `get_equipment_funds`, `create_equipment_fund` |
-
-**Equipment Funds** is the standalone resource for budget / funding-source
-tracking (grants, donations, capital lines) that equipment purchases are booked
-against; it needs the `equipment_funding` module, and the tools return a clean
-"module not enabled" message when it is off.
-
-Two gotchas:
-
-- **Money is in whole cents** (or the team currency's sub-unit). `value: 120000`
-  is $1,200.00.
-- **Equipment costing cannot be edited via `update_equipment`.** `PATCH
-  /equipment/{id}` rejects cost fields outright, and D4H gates costing behind
-  the separate `Equipment.UPDATE_COSTING` permission (distinct from
-  `Equipment.UPDATE` in the `whoami` permissions payload). The tool says so
-  instead of firing a request that would fail.
 
 Full reference: **[docs/configuration.md](./docs/configuration.md)**.
 
