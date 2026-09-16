@@ -48,7 +48,7 @@
 | `get_groups`                      | List personnel groups (sub-teams).                                            |
 | `get_tasks`                       | List tasks (action items, follow-ups, repairs).                               |
 | `get_equipment`                   | Search equipment inventory by status, location, owner, kind, ref, etc.        |
-| `get_equipment_funds`             | List equipment funds — grants, donations, capital/budget lines — with `value`, `spentTotal`, `equipTotal`. |
+| `get_equipment_funds`             | List equipment funding sources (budget lines, grants, donations) equipment purchases are booked against. Requires the `equipment_funding` module. |
 | `search_team`                     | Heterogeneous global search across all resource types.                        |
 
 ### Mutating tools (11) — all default `dry_run: true`
@@ -63,9 +63,34 @@
 | `update_incident`             | Update an existing incident. Most common use: set `endsAt` to close it out.        |
 | `create_equipment`            | Create a new equipment item. To assign to a member at creation, use `location: { resourceType: "Member", id }`. |
 | `update_equipment`            | Update equipment status/notes/flags. `RETIRED` status NOT supported via API.      |
-| `create_equipment_fund`       | Create an equipment funding source. Requires `title` (1–60 chars) and `value` in whole cents. |
+| `create_equipment_fund`       | Create an equipment funding source. `value` is whole cents (not dollars). Requires the `equipment_funding` module. |
 | `add_member_qualification`    | Award a qualification to a member. Supports `memberId: "me"` for the caller.      |
 | `manage_attendance`           | Add / update / remove attendance (POST / PATCH / DELETE). Only DELETE in server — attendance is an edge, not an entity. |
+
+### Costing
+
+D4H exposes cost data **per-resource** — there is no unified costing report
+endpoint — and this server neither reshapes nor filters it.
+
+- **Reads pass cost fields through untouched.** `Member` (`costPerHour`,
+  `costPerUse`) and `Equipment` (`costPerHour`, `costPerUse`,
+  `costPerDistance`, `replacementCost`, `fund`) come back exactly as D4H sends
+  them on every read tool that returns those objects — no field allow-list
+  strips them.
+- **Costing is read-only through this server.** There is no `update_member`
+  tool at all, and [`update_equipment`](./docs/tools.md#update_equipment)
+  rejects cost-field writes up front with an explanation of D4H's separate
+  `Equipment.UPDATE_COSTING` permission — `PATCH /equipment/{id}` itself
+  answers HTTP 400 `unrecognized_keys` for those fields (live-probed), so
+  nothing is sent. Role cost rates (`cost.hour`, `cost.use`) live on D4H's
+  `/roles` endpoint, which this server does not wrap.
+- **Equipment Funds is the one genuine costing/budget resource with real API
+  support.** [`get_equipment_funds`](./docs/tools.md#get_equipment_funds) and
+  [`create_equipment_fund`](./docs/tools.md#create_equipment_fund) cover the
+  grants, donations, and capital/budget lines that equipment purchases are
+  booked against; `value` and `spentTotal` are **whole cents** (`120000` is
+  $1,200.00). Both are gated behind the `equipment_funding` module and return
+  a clean "module not enabled" message when it is off.
 
 ### Stubs registered as unavailable (3)
 
@@ -87,35 +112,6 @@ All tools return structured JSON. Errors come back as MCP results with `isError:
 - **Costing is read-mostly.** Cost rates come back on every member/equipment payload, but member costing has no write path and equipment costing is blocked by D4H's separate `UPDATE_COSTING` permission — see [Costing](#costing).
 - **Failures are reported, not retried or hidden.** A non-2xx from D4H becomes a readable `isError` result; the server does not crash, retry blindly, or invent data.
 - **Module-gated resources say so.** If a resource needs a D4H module the team doesn't have (e.g. `equipment_funding` for Equipment Funds), the tool returns a plain "module not enabled" message instead of a raw 403.
-
----
-
-## Costing
-
-D4H has **no unified "costing report" endpoint**. Cost data is exposed
-per-resource, and this server passes those fields through untouched:
-
-| Where | Fields | Tool |
-|-------|--------|------|
-| `Member` | `costPerHour`, `costPerUse` | `get_members`, `get_member` (read-only — there is no member PATCH support) |
-| `Equipment` | `costPerHour`, `costPerUse`, `costPerDistance`, `replacementCost`, `totalReplacementCost`, `costRepairs`, `fund` | `get_equipment` (read), `create_equipment` (`fundId`, `replacementCost` at creation) |
-| `Role` | `cost.hour`, `cost.use` | D4H's `/roles` endpoint — **not wrapped** by this server; attendance records carry only a `{ resourceType, id }` role reference |
-| `EquipmentFund` | `value`, `spentTotal`, `equipTotal` | `get_equipment_funds`, `create_equipment_fund` |
-
-**Equipment Funds** is the standalone resource for budget / funding-source
-tracking (grants, donations, capital lines) that equipment purchases are booked
-against; it needs the `equipment_funding` module, and the tools return a clean
-"module not enabled" message when it is off.
-
-Two gotchas:
-
-- **Money is in whole cents** (or the team currency's sub-unit). `value: 120000`
-  is $1,200.00.
-- **Equipment costing cannot be edited via `update_equipment`.** `PATCH
-  /equipment/{id}` rejects cost fields outright, and D4H gates costing behind
-  the separate `Equipment.UPDATE_COSTING` permission (distinct from
-  `Equipment.UPDATE` in the `whoami` permissions payload). The tool says so
-  instead of firing a request that would fail.
 
 ---
 
