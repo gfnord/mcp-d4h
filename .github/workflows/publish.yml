@@ -34,7 +34,7 @@ on:
 jobs:
   build:
     name: Build and verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
 
@@ -69,7 +69,7 @@ jobs:
   publish-npm:
     name: Publish to npm (public)
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       # id-token:write is REQUIRED for Trusted Publishing OIDC exchange + provenance.
@@ -104,7 +104,7 @@ jobs:
   publish-github:
     name: Publish to GitHub Packages
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       packages: write
